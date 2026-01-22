@@ -1,9 +1,9 @@
 //! Error types with OpenAI-compatible response formatting.
 
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use thiserror::Error;
 

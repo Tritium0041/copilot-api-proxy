@@ -41,6 +41,7 @@ pub struct ClaudeConvertedRequest {
     pub model: String,
     pub stream: bool,
     pub body: Bytes,
+    pub initiator: String, // "user" or "agent"
 }
 
 pub fn validate_anthropic_headers(headers: &HeaderMap) -> Option<Response> {
@@ -71,7 +72,17 @@ pub fn convert_claude_request(body: Bytes) -> Result<ClaudeConvertedRequest, Err
         .ok_or_else(|| Error::InvalidRequest("Missing required field: model".to_string()))?
         .to_string();
 
-    let stream = value.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let stream = value
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Determine initiator from message history
+    let messages = value
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| Error::InvalidRequest("Missing required field: messages".to_string()))?;
+    let initiator = infer_initiator(messages);
 
     let openai_body = convert_claude_value_to_openai(&value)?;
     let body_bytes = serde_json::to_vec(&openai_body)
@@ -81,6 +92,7 @@ pub fn convert_claude_request(body: Bytes) -> Result<ClaudeConvertedRequest, Err
         model,
         stream,
         body: Bytes::from(body_bytes),
+        initiator: initiator.to_string(),
     })
 }
 
@@ -149,7 +161,10 @@ fn convert_claude_value_to_openai(value: &Value) -> Result<Value, Error> {
     let temperature = value.get("temperature").and_then(|v| v.as_f64());
     let top_p = value.get("top_p").and_then(|v| v.as_f64());
     let stop_sequences = value.get("stop_sequences").and_then(|v| v.as_array());
-    let stream = value.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    let stream = value
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut openai_messages = Vec::new();
 
@@ -212,11 +227,18 @@ fn convert_claude_value_to_openai(value: &Value) -> Result<Value, Error> {
     if let Some(tools) = value.get("tools").and_then(|v| v.as_array()) {
         let mut openai_tools = Vec::new();
         for tool in tools {
-            let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+            let name = tool
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
             if name.is_empty() {
                 continue;
             }
-            let description = tool.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let description = tool
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let parameters = tool.get("input_schema").cloned().unwrap_or(Value::Null);
             openai_tools.push(serde_json::json!({
                 "type": TOOL_FUNCTION,
@@ -233,7 +255,10 @@ fn convert_claude_value_to_openai(value: &Value) -> Result<Value, Error> {
     }
 
     if let Some(tool_choice) = value.get("tool_choice").and_then(|v| v.as_object()) {
-        let choice_type = tool_choice.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let choice_type = tool_choice
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if choice_type == "tool" {
             if let Some(name) = tool_choice.get("name").and_then(|v| v.as_str()) {
                 openai_request["tool_choice"] = serde_json::json!({
@@ -267,7 +292,10 @@ fn convert_claude_user_message(msg: &Value) -> Value {
                 && let Some(source) = block.get("source").and_then(|v| v.as_object())
                 && source.get("type").and_then(|v| v.as_str()) == Some("base64")
             {
-                let media_type = source.get("media_type").and_then(|v| v.as_str()).unwrap_or("");
+                let media_type = source
+                    .get("media_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let data = source.get("data").and_then(|v| v.as_str()).unwrap_or("");
                 if !media_type.is_empty() && !data.is_empty() {
                     openai_content.push(serde_json::json!({
@@ -280,10 +308,7 @@ fn convert_claude_user_message(msg: &Value) -> Value {
     }
 
     if openai_content.len() == 1
-        && openai_content[0]
-            .get("type")
-            .and_then(|v| v.as_str())
-            == Some("text")
+        && openai_content[0].get("type").and_then(|v| v.as_str()) == Some("text")
         && let Some(text) = openai_content[0].get("text").and_then(|v| v.as_str())
     {
         return serde_json::json!({ "role": ROLE_USER, "content": text });
@@ -310,7 +335,10 @@ fn convert_claude_assistant_message(msg: &Value) -> Value {
             } else if block_type == CONTENT_TOOL_USE {
                 let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let input = block.get("input").cloned().unwrap_or(Value::Object(Default::default()));
+                let input = block
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(Value::Object(Default::default()));
                 let arguments = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
                 tool_calls.push(serde_json::json!({
                     "id": id,
@@ -362,7 +390,10 @@ fn convert_claude_tool_results(msg: &Value) -> Vec<Value> {
             if block.get("type").and_then(|v| v.as_str()) != Some(CONTENT_TOOL_RESULT) {
                 continue;
             }
-            let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+            let tool_use_id = block
+                .get("tool_use_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let content = parse_tool_result_content(block.get("content"));
             results.push(serde_json::json!({
                 "role": ROLE_TOOL,
@@ -406,10 +437,9 @@ fn parse_tool_result_content(content: Option<&Value>) -> String {
 }
 
 fn system_text(system: &Value) -> Option<String> {
-    if let Some(text) = system.as_str() {
-        return Some(text.to_string());
-    }
-    if let Some(blocks) = system.as_array() {
+    let raw = if let Some(text) = system.as_str() {
+        text.to_string()
+    } else if let Some(blocks) = system.as_array() {
         let mut parts = Vec::new();
         for block in blocks {
             let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -419,9 +449,37 @@ fn system_text(system: &Value) -> Option<String> {
                 parts.push(text.to_string());
             }
         }
-        return Some(parts.join("\n\n").trim().to_string());
+        parts.join("\n\n").trim().to_string()
+    } else {
+        return None;
+    };
+    Some(sanitize_system_prompt(&raw))
+}
+
+fn sanitize_system_prompt(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.contains("x-anthropic-"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Infer the initiator based on message history.
+/// Returns "agent" if any assistant/tool messages exist, "user" otherwise.
+///
+/// This implements "sticky inference": once a conversation has assistant/tool
+/// messages, all subsequent requests are marked as agent-initiated and do not
+/// consume Copilot premium requests.
+fn infer_initiator(messages: &[Value]) -> &'static str {
+    if messages.iter().any(|msg| {
+        msg.get("role")
+            .and_then(|v| v.as_str())
+            .map(|r| r == ROLE_ASSISTANT || r == ROLE_TOOL)
+            .unwrap_or(false)
+    }) {
+        "agent"
+    } else {
+        "user"
     }
-    None
 }
 
 fn map_model(model: &str) -> String {
@@ -483,11 +541,8 @@ fn convert_openai_to_claude_response(value: &Value, original_model: &str) -> Res
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
                 let input = serde_json::from_str::<Value>(arguments)
-                    .unwrap_or_else(|_| serde_json::json!({ "raw_arguments": arguments }));
-                let id = tool_call
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                    .unwrap_or_else(|_| Value::Object(Default::default()));
+                let id = tool_call.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let tool_id = if id.is_empty() {
                     format!("tool_{}", make_id())
                 } else {
@@ -507,7 +562,10 @@ fn convert_openai_to_claude_response(value: &Value, original_model: &str) -> Res
         content_blocks.push(serde_json::json!({ "type": CONTENT_TEXT, "text": "" }));
     }
 
-    let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str()).unwrap_or("stop");
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("stop");
     let stop_reason = match finish_reason {
         "length" => STOP_MAX_TOKENS,
         "tool_calls" | "function_call" => STOP_TOOL_USE,
@@ -546,7 +604,10 @@ fn convert_openai_to_claude_response(value: &Value, original_model: &str) -> Res
     }))
 }
 
-fn stream_openai_to_claude(resp: reqwest::Response, original_model: String) -> Result<Response, Error> {
+fn stream_openai_to_claude(
+    resp: reqwest::Response,
+    original_model: String,
+) -> Result<Response, Error> {
     let status = resp.status();
     let upstream = resp.bytes_stream();
     let state = StreamState::new(upstream, original_model);
@@ -637,7 +698,6 @@ struct ToolCallState {
     id: Option<String>,
     name: Option<String>,
     args_buffer: String,
-    last_sent_len: usize,
     claude_index: Option<usize>,
     started: bool,
 }
@@ -749,7 +809,10 @@ impl StreamConverter {
         )));
 
         let ping = serde_json::json!({ "type": EVENT_PING });
-        pending.push_back(Bytes::from(format!("event: {EVENT_PING}\ndata: {}\n\n", ping)));
+        pending.push_back(Bytes::from(format!(
+            "event: {EVENT_PING}\ndata: {}\n\n",
+            ping
+        )));
     }
 
     fn consume_line(&mut self, line: &str, pending: &mut VecDeque<Bytes>) {
@@ -771,7 +834,10 @@ impl StreamConverter {
             if let Some(usage) = chunk.get("usage")
                 && let Some(prompt_tokens) = usage.get("prompt_tokens").and_then(|v| v.as_u64())
             {
-                let completion_tokens = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let completion_tokens = usage
+                    .get("completion_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 let cache_read = usage
                     .get("prompt_tokens_details")
                     .and_then(|v| v.get("cached_tokens"))
@@ -811,65 +877,72 @@ impl StreamConverter {
 
                 if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                     for tool_delta in tool_calls {
-                        let index = tool_delta.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                        let entry = self.current_tool_calls.entry(index).or_insert_with(|| ToolCallState {
-                            id: None,
-                            name: None,
-                            args_buffer: String::new(),
-                            last_sent_len: 0,
-                            claude_index: None,
-                            started: false,
-                        });
+                        let index = tool_delta
+                            .get("index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        let entry =
+                            self.current_tool_calls
+                                .entry(index)
+                                .or_insert_with(|| ToolCallState {
+                                    id: None,
+                                    name: None,
+                                    args_buffer: String::new(),
+                                    claude_index: None,
+                                    started: false,
+                                });
 
                         if let Some(id) = tool_delta.get("id").and_then(|v| v.as_str()) {
                             entry.id = Some(id.to_string());
                         }
 
-                        if let Some(function) = tool_delta.get(TOOL_FUNCTION).and_then(|v| v.as_object()) {
+                        if let Some(function) =
+                            tool_delta.get(TOOL_FUNCTION).and_then(|v| v.as_object())
+                        {
                             if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
                                 entry.name = Some(name.to_string());
                             }
 
                             if !entry.started
-                                && let (Some(id), Some(name)) = (entry.id.clone(), entry.name.clone()) {
-                                    self.tool_block_counter += 1;
-                                    let claude_index = self.text_block_index + self.tool_block_counter;
-                                    entry.claude_index = Some(claude_index);
-                                    entry.started = true;
-                                    let event = serde_json::json!({
-                                        "type": EVENT_CONTENT_BLOCK_START,
-                                        "index": claude_index,
-                                        "content_block": {
-                                            "type": CONTENT_TOOL_USE,
-                                            "id": id,
-                                            "name": name,
-                                            "input": {}
-                                        }
-                                    });
-                                    pending.push_back(Bytes::from(format!(
-                                        "event: {EVENT_CONTENT_BLOCK_START}\ndata: {}\n\n",
-                                        event
-                                    )));
-                                }
+                                && let (Some(id), Some(name)) =
+                                    (entry.id.clone(), entry.name.clone())
+                            {
+                                self.tool_block_counter += 1;
+                                let claude_index = self.text_block_index + self.tool_block_counter;
+                                entry.claude_index = Some(claude_index);
+                                entry.started = true;
+                                let event = serde_json::json!({
+                                    "type": EVENT_CONTENT_BLOCK_START,
+                                    "index": claude_index,
+                                    "content_block": {
+                                        "type": CONTENT_TOOL_USE,
+                                        "id": id,
+                                        "name": name,
+                                        "input": {}
+                                    }
+                                });
+                                pending.push_back(Bytes::from(format!(
+                                    "event: {EVENT_CONTENT_BLOCK_START}\ndata: {}\n\n",
+                                    event
+                                )));
+                            }
 
                             if entry.started
-                                && let Some(arguments) = function.get("arguments").and_then(|v| v.as_str())
+                                && let Some(arguments) =
+                                    function.get("arguments").and_then(|v| v.as_str())
                                 && !arguments.is_empty()
                             {
                                 entry.args_buffer.push_str(arguments);
-                                if let Some(index) = entry.claude_index
-                                    && entry.args_buffer.len() > entry.last_sent_len
-                                {
+                                if let Some(index) = entry.claude_index {
                                     let event = serde_json::json!({
                                         "type": EVENT_CONTENT_BLOCK_DELTA,
                                         "index": index,
-                                        "delta": { "type": DELTA_INPUT_JSON, "partial_json": entry.args_buffer }
+                                        "delta": { "type": DELTA_INPUT_JSON, "partial_json": arguments }
                                     });
                                     pending.push_back(Bytes::from(format!(
                                         "event: {EVENT_CONTENT_BLOCK_DELTA}\ndata: {}\n\n",
                                         event
                                     )));
-                                    entry.last_sent_len = entry.args_buffer.len();
                                 }
                             }
                         }

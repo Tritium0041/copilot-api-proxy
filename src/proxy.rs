@@ -5,15 +5,21 @@ use crate::error::Error;
 use axum::body::{Body, Bytes};
 use axum::response::Response;
 use futures::TryStreamExt;
-use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::Client;
+use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::Arc;
 
 const COPILOT_API_BASE: &str = "https://api.individual.githubcopilot.com";
 
 const HOP_BY_HOP: &[&str] = &[
-    "transfer-encoding", "connection", "keep-alive",
-    "proxy-authenticate", "proxy-authorization", "te", "trailers", "upgrade",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "upgrade",
 ];
 
 pub struct ProxyClient {
@@ -26,7 +32,10 @@ impl ProxyClient {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()?;
-        Ok(Self { client, token_manager })
+        Ok(Self {
+            client,
+            token_manager,
+        })
     }
 
     pub async fn forward(
@@ -35,13 +44,15 @@ impl ProxyClient {
         method: reqwest::Method,
         body: Bytes,
         content_type: Option<&str>,
+        initiator: Option<&str>,
     ) -> Result<reqwest::Response, Error> {
         let token = self.token_manager.get_token().await?;
 
-        let mut req = self.client
+        let mut req = self
+            .client
             .request(method, format!("{}{}", COPILOT_API_BASE, path))
             .bearer_auth(&token)
-            .headers(copilot_headers());
+            .headers(copilot_headers(initiator));
 
         if let Some(ct) = content_type {
             req = req.header("Content-Type", ct);
@@ -51,14 +62,40 @@ impl ProxyClient {
     }
 }
 
-fn copilot_headers() -> HeaderMap {
+fn copilot_headers(initiator: Option<&str>) -> HeaderMap {
     let mut h = HeaderMap::new();
     h.insert("editor-version", HeaderValue::from_static("vscode/1.98.1"));
-    h.insert("editor-plugin-version", HeaderValue::from_static("copilot-chat/0.26.7"));
-    h.insert("user-agent", HeaderValue::from_static("GitHubCopilotChat/0.26.7"));
-    h.insert("x-github-api-version", HeaderValue::from_static("2025-04-01"));
-    h.insert("copilot-integration-id", HeaderValue::from_static("vscode-chat"));
-    h.insert("openai-intent", HeaderValue::from_static("conversation-panel"));
+    h.insert(
+        "editor-plugin-version",
+        HeaderValue::from_static("copilot-chat/0.26.7"),
+    );
+    h.insert(
+        "user-agent",
+        HeaderValue::from_static("GitHubCopilotChat/0.26.7"),
+    );
+    h.insert(
+        "x-github-api-version",
+        HeaderValue::from_static("2025-04-01"),
+    );
+    h.insert(
+        "copilot-integration-id",
+        HeaderValue::from_static("vscode-chat"),
+    );
+    h.insert(
+        "openai-intent",
+        HeaderValue::from_static("conversation-panel"),
+    );
+
+    // X-Initiator: "user" consumes premium, "agent" does not
+    h.insert(
+        "X-Initiator",
+        HeaderValue::from_static(if initiator == Some("agent") {
+            "agent"
+        } else {
+            "user"
+        }),
+    );
+
     h
 }
 
@@ -92,5 +129,7 @@ pub async fn forward_response(resp: reqwest::Response) -> Result<Response, Error
         Body::from(resp.bytes().await?)
     };
 
-    builder.body(body).map_err(|e| Error::InvalidRequest(e.to_string()))
+    builder
+        .body(body)
+        .map_err(|e| Error::InvalidRequest(e.to_string()))
 }

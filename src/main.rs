@@ -65,7 +65,9 @@ async fn run_server(port: u16, log_level: &str) -> Result<()> {
     tracing::info!("Server listening on http://0.0.0.0:{}", port);
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(async { tokio::signal::ctrl_c().await.ok(); })
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+        })
         .await?;
 
     Ok(())

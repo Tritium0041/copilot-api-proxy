@@ -131,7 +131,10 @@ impl TokenManager {
         let copilot_token = Arc::new(RwLock::new(Some(initial)));
         let refresh_handle = Self::spawn_refresh(github_token, Arc::clone(&copilot_token));
 
-        Ok(Self { copilot_token, refresh_handle })
+        Ok(Self {
+            copilot_token,
+            refresh_handle,
+        })
     }
 
     pub async fn get_token(&self) -> Result<String, Error> {
@@ -152,7 +155,10 @@ impl TokenManager {
         })
     }
 
-    fn spawn_refresh(github_token: String, token: Arc<RwLock<Option<CopilotToken>>>) -> JoinHandle<()> {
+    fn spawn_refresh(
+        github_token: String,
+        token: Arc<RwLock<Option<CopilotToken>>>,
+    ) -> JoinHandle<()> {
         tokio::spawn(async move {
             loop {
                 let refresh_at = match token.read().await.as_ref() {
