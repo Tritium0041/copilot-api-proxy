@@ -22,7 +22,7 @@ A reverse proxy for the GitHub Copilot API that exposes OpenAI-compatible endpoi
 ## Features
 
 - OpenAI-compatible `/v1/*` endpoints
-- Pure passthrough of request/response bodies (no schema translation) for OpenAI endpoints.
+- Pure passthrough of request/response bodies (no schema translation) for OpenAI endpoints, except for minimal initiator inference on `/v1/chat/completions` and `/v1/responses` to set `X-Initiator`.
 - Claude Code `/v1/messages` compatibility via request/response conversion.
 - GitHub OAuth device flow for one-time authentication.
 - Automatic Copilot token refresh in the background.

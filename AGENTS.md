@@ -4,7 +4,7 @@
 
 **copilot-api-proxy** is a reverse proxy server written in Rust that provides OpenAI-compatible API endpoints by forwarding requests to the GitHub Copilot API with proper authentication.
 
-**Key Design Philosophy**: This is a **pure reverse proxy** with **auth injection only**. It does NOT translate or modify request/response bodies. The Copilot API is already OpenAI-compatible, so the proxy simply injects authentication headers and forwards requests unchanged.
+**Key Design Philosophy**: This is a **pure reverse proxy** with **auth injection only**. It does NOT translate or modify request/response bodies for OpenAI-compatible endpoints, except for minimal initiator inference on `/v1/chat/completions` and `/v1/responses` to set `X-Initiator`. The Copilot API is already OpenAI-compatible, so the proxy simply injects authentication headers and forwards requests unchanged.
 
 ---
 
@@ -89,6 +89,8 @@ Generic Proxy Handler (single handler for ALL endpoints)
     ↓
 ProxyClient (injects Copilot auth headers)
     ↓
+Initiator inference (chat/responses only; sets `X-Initiator`)
+    ↓
 TokenManager (background refresh)
     ↓
 GitHub Copilot API (api.individual.githubcopilot.com)
@@ -102,7 +104,7 @@ Client Response (unchanged from upstream)
 
 1. **Single Generic Proxy Handler**: One `proxy_handler()` serves ALL `/v1/*` endpoints (chat completions, responses, embeddings, etc.). No endpoint-specific code needed.
 
-2. **No Request/Response Parsing**: Bodies are passed through as `Bytes`. No serde models for API schemas. This ensures forward compatibility with any Copilot API changes.
+2. **No Request/Response Parsing**: Bodies are passed through as `Bytes`. No serde models for API schemas. This ensures forward compatibility with any Copilot API changes. The only exception is minimal parsing of chat/responses bodies to infer `X-Initiator`.
 
 3. **Background Token Refresh**: `TokenManager` spawns a background task that refreshes the Copilot token 60 seconds before expiry. Thread-safe access via `Arc<RwLock>`.
 
@@ -118,6 +120,7 @@ src/
 ├── lib.rs       # Library exports
 ├── config.rs    # Token path and loading functions
 ├── auth.rs      # Device flow, token exchange, token manager
+├── initiator.rs # Initiator inference for sticky inference
 ├── proxy.rs     # HTTP client, headers, response forwarding
 ├── server.rs    # Router, app state, proxy handler
 └── error.rs     # Single Error enum with OpenAI responses
@@ -201,7 +204,15 @@ When forwarding responses, these headers are filtered out:
 
 **Why**: These headers are set by the HTTP stack and cause conflicts if manually forwarded.
 
-### 6. Error Response Format
+### 6. Initiator Inference (Sticky Inference)
+
+**Files**: `src/initiator.rs`, `src/server.rs`
+
+- For `/v1/chat/completions` and `/v1/responses`, the proxy minimally parses the request body to check for any prior `assistant` or `tool` roles.
+- If found, it sets `X-Initiator: agent` so follow-up turns do not consume Copilot premium requests.
+- All other endpoints remain full passthrough.
+
+### 7. Error Response Format
 
 **File**: `src/error.rs`
 
@@ -228,7 +239,7 @@ pub enum Error {
 }
 ```
 
-### 7. Token Storage
+### 8. Token Storage
 
 **File**: `src/config.rs`
 

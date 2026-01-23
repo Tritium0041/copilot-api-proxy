@@ -4,6 +4,7 @@ pub mod auth;
 pub mod claude;
 pub mod config;
 pub mod error;
+pub mod initiator;
 pub mod proxy;
 pub mod server;
 

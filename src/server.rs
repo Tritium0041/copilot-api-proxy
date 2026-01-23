@@ -5,6 +5,7 @@ use crate::claude::{
     convert_claude_request, convert_openai_response, error_from_proxy, validate_anthropic_headers,
 };
 use crate::error::Error;
+use crate::initiator::{infer_initiator_openai_chat_completions, infer_initiator_openai_responses};
 use crate::proxy::{ProxyClient, forward_response};
 use axum::Router;
 use axum::body::Bytes;
@@ -13,6 +14,20 @@ use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 use axum::routing::any;
 use std::sync::Arc;
+
+/// Infer initiator from request body for sticky inference cost savings.
+/// Returns Some("agent") if conversation has assistant/tool messages,
+/// Some("user") for new conversations, or None for non-inferable requests.
+fn infer_initiator(path: &str, method: &Method, body: &[u8]) -> Option<&'static str> {
+    if method != Method::POST {
+        return None;
+    }
+    match path {
+        "chat/completions" => Some(infer_initiator_openai_chat_completions(body)),
+        "responses" => Some(infer_initiator_openai_responses(body)),
+        _ => None,
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -86,6 +101,9 @@ async fn proxy_handler(
         return Ok(response);
     }
 
+    // Infer initiator from message/input history for sticky inference
+    let initiator = infer_initiator(&path, &method, &body);
+
     let resp = state
         .proxy
         .forward(
@@ -93,7 +111,7 @@ async fn proxy_handler(
             method,
             body,
             content_type,
-            None,
+            initiator,
         )
         .await?;
     forward_response(resp).await

@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::error::Error;
+use crate::{error::Error, initiator::infer_initiator_claude as infer_initiator};
 
 const ROLE_USER: &str = "user";
 const ROLE_ASSISTANT: &str = "assistant";
@@ -461,25 +461,6 @@ fn sanitize_system_prompt(text: &str) -> String {
         .filter(|line| !line.contains("x-anthropic-"))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Infer the initiator based on message history.
-/// Returns "agent" if any assistant/tool messages exist, "user" otherwise.
-///
-/// This implements "sticky inference": once a conversation has assistant/tool
-/// messages, all subsequent requests are marked as agent-initiated and do not
-/// consume Copilot premium requests.
-fn infer_initiator(messages: &[Value]) -> &'static str {
-    if messages.iter().any(|msg| {
-        msg.get("role")
-            .and_then(|v| v.as_str())
-            .map(|r| r == ROLE_ASSISTANT || r == ROLE_TOOL)
-            .unwrap_or(false)
-    }) {
-        "agent"
-    } else {
-        "user"
-    }
 }
 
 fn map_model(model: &str) -> String {
