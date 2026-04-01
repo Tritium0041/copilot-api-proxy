@@ -85,9 +85,45 @@ impl AmpManagementProxy {
             }
         }
 
+        // If we have an explicit upstream API key (env var or ampcode.com secrets),
+        // replace the client's auth with it. Otherwise, forward the client's auth
+        // headers as-is — Amp CLI sends its ampcode.com API key directly.
+        if let Some(api_key) = resolve_ampcode_api_key() {
+            req = req.header("authorization", format!("Bearer {api_key}"));
+            req = req.header("x-api-key", &api_key);
+        }
+
         let resp = req.body(body).send().await?;
         forward_response(resp).await
     }
+}
+
+/// Resolve the ampcode.com API key from available sources.
+/// Priority: `AMP_API_KEY` env var → `~/.local/share/amp/secrets.json`
+fn resolve_ampcode_api_key() -> Option<String> {
+    // 1. Environment variable
+    if let Ok(key) = std::env::var("AMP_API_KEY") {
+        let key = key.trim().to_string();
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+
+    // 2. Amp secrets file (written by `amp login`)
+    let home = dirs::home_dir()?;
+    let secrets_path = home
+        .join(".local")
+        .join("share")
+        .join("amp")
+        .join("secrets.json");
+    let content = std::fs::read_to_string(secrets_path).ok()?;
+    let secrets: serde_json::Value = serde_json::from_str(&content).ok()?;
+    secrets
+        .get("apiKey@https://ampcode.com/")
+        .or_else(|| secrets.get("apiKey@https://ampcode.com"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 // ---------------------------------------------------------------------------
