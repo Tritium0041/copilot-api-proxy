@@ -287,10 +287,20 @@ async fn handle_anthropic(
         }
         "messages" if method == Method::POST => {
             // No validate_anthropic_headers for Amp path — auth is handled differently
-            let converted = match convert_claude_request(body) {
+            let mut converted = match convert_claude_request(body) {
                 Ok(c) => c,
                 Err(e) => return Ok(error_from_proxy(e)),
             };
+
+            // Use a free model for lightweight non-streaming haiku requests
+            // (e.g. titling) to avoid consuming premium Copilot requests.
+            if !converted.stream
+                && converted.initiator == "user"
+                && converted.model.contains("haiku")
+            {
+                converted.body = rewrite_model_in_body(&converted.body, "gpt-5-mini");
+            }
+
             let resp = match state
                 .proxy
                 .forward(
@@ -397,6 +407,22 @@ async fn handle_google(
             .forward(method, pq, headers, body)
             .await
     }
+}
+
+/// Rewrite the "model" field in a JSON request body.
+fn rewrite_model_in_body(body: &Bytes, new_model: &str) -> Bytes {
+    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert(
+                "model".to_string(),
+                serde_json::Value::String(new_model.to_string()),
+            );
+            if let Ok(bytes) = serde_json::to_vec(&value) {
+                return Bytes::from(bytes);
+            }
+        }
+    }
+    body.clone()
 }
 
 /// Analyze request body for initiator and vision detection (same logic as server.rs).
