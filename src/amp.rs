@@ -30,7 +30,7 @@ use reqwest::Client;
 
 const AMPCODE_DEFAULT_UPSTREAM: &str = "https://ampcode.com";
 
-/// Headers that should NOT be forwarded to ampcode.com upstream.
+/// Hop-by-hop headers that should NOT be forwarded to ampcode.com upstream.
 const SKIP_FORWARD_HEADERS: &[&str] = &[
     "host",
     "transfer-encoding",
@@ -41,10 +41,6 @@ const SKIP_FORWARD_HEADERS: &[&str] = &[
     "te",
     "trailers",
     "upgrade",
-    // Strip client auth — we inject our own upstream key
-    "authorization",
-    "x-api-key",
-    "x-goog-api-key",
 ];
 
 /// Reverse proxy for Amp management routes (auth, threads, user, etc.).
@@ -89,12 +85,12 @@ impl AmpManagementProxy {
             }
         }
 
-        // Inject upstream API key if available
+        // If we have an explicit upstream API key (env var or ampcode.com secrets),
+        // replace the client's auth with it. Otherwise, forward the client's auth
+        // headers as-is — Amp CLI sends its ampcode.com API key directly.
         if let Some(api_key) = resolve_ampcode_api_key() {
-            req = req.bearer_auth(&api_key);
+            req = req.header("authorization", format!("Bearer {api_key}"));
             req = req.header("x-api-key", &api_key);
-        } else {
-            tracing::debug!("No ampcode API key found, forwarding management request without auth");
         }
 
         let resp = req.body(body).send().await?;
