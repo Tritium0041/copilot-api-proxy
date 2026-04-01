@@ -1,6 +1,6 @@
 # copilot-api-proxy
 
-A reverse proxy for the GitHub Copilot API that exposes OpenAI and Anthropic compatible endpoints. It forwards requests unchanged and injects the required Copilot authentication headers.
+A reverse proxy for GitHub Copilot that exposes OpenAI-compatible `/v1/*` routes, an Anthropic-compatible `/v1/messages` surface, and Amp provider routes for OpenAI, Anthropic, and Gemini. OpenAI requests are forwarded mostly unchanged; Anthropic and Gemini compatibility routes translate to Copilot's OpenAI-style upstream.
 
 > [!WARNING]
 > This is a reverse-engineered proxy of GitHub Copilot API. It is not supported by GitHub, and may break unexpectedly. Use at your own risk.
@@ -21,15 +21,15 @@ A reverse proxy for the GitHub Copilot API that exposes OpenAI and Anthropic com
 
 ## Features
 
-- **OpenAI-compatible endpoints** — `/v1/chat/completions`, `/v1/responses`, `/v1/models`
-- **Anthropic-compatible endpoint** — `/v1/messages` with full request/response conversion
-- **Pure passthrough** — No schema translation for OpenAI endpoints (minimal initiator inference only)
-- **Streaming support** — Server-Sent Events (SSE) for both OpenAI and Anthropic formats
-- **Tool/function calling** — Full support for tool use in both API formats
-- **Vision support** — Image inputs are forwarded with proper Copilot headers
-- **GitHub OAuth device flow** — One-time browser-based authentication
-- **Automatic token refresh** — Copilot tokens are refreshed in the background
-- **System service** — Install as a daemon on macOS/Linux
+- OpenAI-compatible passthrough on `/v1/*`
+- Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens`
+- Amp provider routes for OpenAI, Anthropic, and Gemini clients
+- Amp management proxy for `/api/*`, `/threads*`, `/auth*`, `/docs*`, `/settings*`, and RSS routes
+- Streaming, tool/function calling, and vision support
+- Sticky `X-Initiator` inference for multi-turn requests
+- GitHub OAuth device flow authentication
+- Background Copilot token refresh
+- User-level service install via `service-manager`
 
 ## Requirements
 
@@ -47,13 +47,13 @@ The binary will be at `target/release/copilot-api-proxy`.
 
 ## Quick Start
 
-### 1. Authenticate (one-time)
+### 1. Authenticate once
 
 ```bash
 copilot-api-proxy auth
 ```
 
-This opens a browser for GitHub OAuth and stores the token at `~/.local/share/copilot-api-proxy/github_token`.
+The command prints the GitHub device-flow URL and user code in the terminal, then stores the GitHub token at `~/.local/share/copilot-api-proxy/github_token`.
 
 ### 2. Start the proxy
 
@@ -68,19 +68,22 @@ copilot-api-proxy server --port 8080
 copilot-api-proxy server --log-level debug
 ```
 
-### 3. Use the API
+### 3. Point clients at the proxy
 
-Point your OpenAI or Anthropic client to `http://localhost:9876`.
+Use `http://localhost:9876` as the base URL for OpenAI-compatible and Anthropic-compatible clients. Amp clients can use the same server for provider and management routes.
 
-## API Endpoints
+## API Surfaces
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/v1/chat/completions` | POST | OpenAI chat completions |
-| `/v1/responses` | POST | OpenAI responses API (gpt-5 only) |
-| `/v1/models` | GET | List available models |
-| `/v1/messages` | POST | Anthropic messages API (converted to OpenAI) |
-| `/health` | GET | Health check |
+| Route | Method | Behavior |
+|-------|--------|----------|
+| `/v1/{*path}` | Any | Forwards to `https://api.individual.githubcopilot.com/{*path}` after stripping `/v1/`. `/chat/completions` and `/responses` get initiator and vision inference. |
+| `/v1/messages` | POST | Converts Anthropic Messages API requests to OpenAI chat/completions and converts responses back to Anthropic format. |
+| `/v1/messages/count_tokens` | POST | Estimates Anthropic input tokens locally with `tiktoken-rs`. |
+| `/api/provider/openai/{version}/{*path}` | Any | Amp OpenAI provider routes proxied through Copilot. |
+| `/api/provider/anthropic/{version}/messages` | POST | Amp Anthropic provider route converted through Copilot. |
+| `/api/provider/anthropic/{version}/messages/count_tokens` | POST | Local Anthropic token counting for Amp clients. |
+| `/api/provider/google/{version}/models/{model}:{action}` | POST | Gemini `generateContent`, `streamGenerateContent`, and `countTokens` translated through Copilot. |
+| `/api/*`, `/auth*`, `/threads*`, `/docs*`, `/settings*`, `/news.rss` | Any | Amp management routes proxied to `https://ampcode.com` or `AMP_UPSTREAM_URL`. |
 
 ## Usage Examples
 
@@ -92,18 +95,6 @@ curl -X POST http://localhost:9876/v1/chat/completions \
   -d '{
     "model": "gpt-4o-mini-2024-07-18",
     "messages": [{"role": "user", "content": "Hello"}]
-  }'
-```
-
-### Streaming Response
-
-```bash
-curl -X POST http://localhost:9876/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gpt-4o-mini-2024-07-18",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "stream": true
   }'
 ```
 
@@ -127,6 +118,28 @@ curl -X POST http://localhost:9876/v1/messages \
   }'
 ```
 
+### Anthropic Token Counting
+
+```bash
+curl -X POST http://localhost:9876/v1/messages/count_tokens \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+### Gemini Provider Route
+
+```bash
+curl -X POST \
+  "http://localhost:9876/api/provider/google/v1beta/models/gemini-2.5-pro:generateContent" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
+  }'
+```
+
 ### List Models
 
 ```bash
@@ -135,7 +148,7 @@ curl http://localhost:9876/v1/models
 
 ## System Service
 
-Install as a system daemon to run automatically on boot:
+Install as a user-level service:
 
 ```bash
 # Install the service (default port: 9876)
@@ -150,52 +163,66 @@ copilot-api-proxy service uninstall
 
 ## Configuration
 
+### Token Storage
+
+- Token path: `~/.local/share/copilot-api-proxy/github_token`
+- Directory permissions: `0700`
+- File permissions: `0600`
+- Load order: `GITHUB_TOKEN` env var, then the token file
+
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `GITHUB_TOKEN` | Override the stored GitHub token | Token file |
-| `ANTHROPIC_API_KEY` | Require API key for `/v1/messages` | None (no auth) |
-| `BIG_MODEL` | Model for Claude opus requests | `claude-opus-4.5` |
-| `MIDDLE_MODEL` | Model for Claude sonnet requests | `claude-sonnet-4.5` |
-| `SMALL_MODEL` | Model for Claude haiku requests | `claude-haiku-4.5` |
-| `MAX_TOKENS_LIMIT` | Maximum `max_tokens` for Claude requests | `16384` |
-| `MIN_TOKENS_LIMIT` | Minimum `max_tokens` for Claude requests | `100` |
-| `RUST_LOG` | Logging verbosity | `info` |
+| `ANTHROPIC_API_KEY` | Require an API key for the direct `/v1/messages` route | Unset |
+| `BIG_MODEL` | Upstream model used for Anthropic `opus` requests | `claude-opus-4.5` |
+| `MIDDLE_MODEL` | Upstream model used for Anthropic `sonnet` requests | `claude-sonnet-4.5` |
+| `SMALL_MODEL` | Upstream model used for Anthropic `haiku` requests | `claude-haiku-4.5` |
+| `MAX_TOKENS_LIMIT` | Maximum Anthropic `max_tokens` forwarded upstream | `4096` |
+| `MIN_TOKENS_LIMIT` | Minimum Anthropic `max_tokens` forwarded upstream | `100` |
+| `AMP_API_KEY` | API key injected when proxying Amp management routes | Amp secrets file or unset |
+| `AMP_UPSTREAM_URL` | Base URL for proxied Amp management routes | `https://ampcode.com` |
+| `RUST_LOG` | Overrides the logger filter entirely | Unset |
 
 ### Logging
 
+If `RUST_LOG` is unset, `copilot-api-proxy server --log-level <level>` builds the filter `copilot_api_proxy=<level>,tower_http=<level>`.
+
 ```bash
 # Debug logging for the proxy and HTTP layer
-RUST_LOG=copilot_api_proxy=debug,tower_http=debug copilot-api-proxy server
+copilot-api-proxy server --log-level debug
 
-# Trace logging for maximum verbosity
-RUST_LOG=trace copilot-api-proxy server
+# Explicit env-based filter
+RUST_LOG=copilot_api_proxy=debug,tower_http=debug copilot-api-proxy server
 ```
 
-### API Key Authentication
+### Anthropic Route Authentication
 
-To require authentication for the Anthropic-compatible endpoint:
+To require an API key for the direct `/v1/messages` route:
 
 ```bash
 ANTHROPIC_API_KEY=your-secret-key copilot-api-proxy server
 ```
 
-Clients must then provide the key via `x-api-key` header or `Authorization: Bearer` header.
+Clients must then provide the key via `x-api-key` or `Authorization: Bearer ...`.
 
 ## How It Works
 
-1. **Authentication**: Uses GitHub's OAuth device flow to obtain a user token
-2. **Token Exchange**: Exchanges the GitHub token for a Copilot API token
-3. **Auto-refresh**: Background task refreshes the Copilot token before expiry
-4. **Proxying**: Forwards requests to `api.individual.githubcopilot.com` with proper headers
-5. **Conversion**: For `/v1/messages`, converts between Anthropic and OpenAI formats
+1. `auth` runs GitHub's OAuth device flow and stores the GitHub token locally.
+2. The server exchanges that GitHub token for a Copilot API token.
+3. `TokenManager` refreshes the Copilot token in the background before expiry.
+4. OpenAI-compatible `/v1/*` requests are forwarded to `api.individual.githubcopilot.com` with Copilot headers injected.
+5. Anthropic and Gemini compatibility routes translate request and response formats around the same Copilot upstream.
+6. Amp provider routes are handled locally when supported; Amp management routes are proxied to `ampcode.com`.
 
-### X-Initiator Header
+### Sticky Inference
 
-The proxy infers whether a request is user-initiated or agent-initiated based on the message history:
-- **User-initiated**: Consumes premium request quota
-- **Agent-initiated**: Uses standard quota
+For OpenAI chat/responses requests and converted Anthropic/Gemini requests, the proxy inspects message history:
+
+- Requests with only user turns are marked `X-Initiator: user`
+- Requests containing prior `assistant` or `tool` turns are marked `X-Initiator: agent`
+- Vision inputs set `Copilot-Vision-Request: true`
 
 ## License
 
