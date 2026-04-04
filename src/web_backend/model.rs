@@ -1,8 +1,15 @@
 //! Model-native web search via Copilot Responses API with `web_search` tool.
 //!
 //! Uses the `/v1/responses` endpoint with `tools: [{type: "web_search"}]`.
-//! Models like gpt-5.1, gpt-5.2, gpt-5.4 support this and perform real
-//! web searches, returning results with URL citations.
+//! GPT-5 family models support this and perform real web searches,
+//! returning results with URL citations.
+//!
+//! Supported models (via Copilot):
+//! - `gpt-5-mini` (default, cheapest)
+//! - `gpt-5.1`
+//! - `gpt-5.2` (more thorough, opens pages)
+//! - `gpt-5.4` (most thorough)
+//! - `gpt-5.4-mini`
 //!
 //! Page extraction falls back to Jina Reader since the Responses API
 //! doesn't have an equivalent.
