@@ -38,8 +38,9 @@ enum Commands {
         #[arg(long, default_value = "jina", value_parser = clap::value_parser!(SearchProvider))]
         search_provider: SearchProvider,
         /// Model to use for --search-provider=model.
-        /// Any Copilot-supported chat model works. Cheaper models save quota.
-        #[arg(long, default_value = "gpt-5-mini")]
+        /// Must support the Responses API with web_search tool
+        /// (e.g. gpt-5.1, gpt-5.2, gpt-5.4).
+        #[arg(long, default_value = "gpt-5.1")]
         search_model: String,
     },
     /// Manage the system service
