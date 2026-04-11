@@ -65,9 +65,21 @@ impl WebBackend for BraveBackend {
                         {
                             for item in items {
                                 results.push(SearchResult {
-                                    title: item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                                    url: item.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-                                    content: item.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string(),
+                                    title: item
+                                        .get("title")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    url: item
+                                        .get("url")
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    content: item
+                                        .get("description")
+                                        .and_then(|d| d.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
                                 });
                             }
                         }

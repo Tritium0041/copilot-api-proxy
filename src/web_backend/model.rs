@@ -97,13 +97,8 @@ impl ModelBackend {
                         continue;
                     }
 
-                    let text = block
-                        .get("text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    let annotations = block
-                        .get("annotations")
-                        .and_then(|a| a.as_array());
+                    let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                    let annotations = block.get("annotations").and_then(|a| a.as_array());
 
                     if let Some(annotations) = annotations {
                         for ann in annotations {
@@ -129,11 +124,7 @@ impl ModelBackend {
                                 && !results.iter().any(|r: &SearchResult| r.url == url)
                             {
                                 results.push(SearchResult {
-                                    title: if title.is_empty() {
-                                        url.clone()
-                                    } else {
-                                        title
-                                    },
+                                    title: if title.is_empty() { url.clone() } else { title },
                                     url,
                                     content: snippet,
                                 });

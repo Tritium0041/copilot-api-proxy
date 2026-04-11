@@ -11,7 +11,7 @@
 **Design Philosophy**
 
 - Keep OpenAI-compatible routes as raw-byte passthrough whenever possible.
-- Do protocol translation only on explicit compatibility surfaces such as `/v1/messages`, `/v1/messages/count_tokens`, and Amp Anthropic / Gemini provider routes.
+- Do protocol translation only on explicit compatibility surfaces for non-Claude models such as `/v1/messages`, `/v1/messages/count_tokens`, and Amp Anthropic / Gemini provider routes. Native Claude models on Anthropic routes are forwarded directly.
 - Proxy Amp management traffic to `ampcode.com` by default. In `--amp-local` mode, serve the supported local `/api/*` subset, stub `/news.rss`, and fail loudly for unsupported Amp fallbacks instead of proxying them upstream.
 - Limit request inspection to the minimum needed for sticky inference and vision detection.
 
@@ -136,14 +136,16 @@ Axum Router
     |
     +-- /v1/{*path}
     |      |
-    |      +-- /v1/messages -> Claude compatibility conversion -> Copilot /chat/completions
-    |      +-- /v1/messages/count_tokens -> local tiktoken-based estimator
+    |      +-- /v1/messages -> native Claude passthrough to Copilot /v1/messages
+    |      |                    or non-Claude conversion -> Copilot /chat/completions
+    |      +-- /v1/messages/count_tokens -> native Claude passthrough or local tiktoken estimator
     |      '-- everything else -> generic Copilot passthrough
     |
     '-- /api/* and Amp root routes
            |
            +-- /api/provider/openai/* -> generic Copilot passthrough
-           +-- /api/provider/anthropic/* -> Claude compatibility conversion
+           +-- /api/provider/anthropic/* -> native Claude passthrough (except haiku cost-saving rewrite)
+           |                                or non-Claude conversion
            +-- /api/provider/google/* -> Gemini compatibility conversion
            +-- selected /api/* management routes -> local handlers when --amp-local is enabled
            +-- /news.rss -> local stub when --amp-local is enabled
@@ -173,7 +175,7 @@ src/
 ├── proxy.rs         # Copilot HTTP client and response forwarding
 ├── initiator.rs     # Sticky inference and vision detection
 ├── server.rs        # Main router, /v1 handler, Anthropic direct route handling
-├── claude.rs        # Anthropic <-> OpenAI conversion and Anthropic-style errors
+├── claude.rs        # Anthropic <-> OpenAI conversion, native Claude passthrough detection, and Anthropic-style errors
 ├── gemini.rs        # Gemini native API <-> OpenAI conversion
 ├── amp.rs           # Amp provider routing and management reverse proxy
 ├── amp_local.rs     # Local Amp API handlers (--amp-local mode)
@@ -214,11 +216,13 @@ Only two `/v1` paths are special-cased locally:
 
 Everything else remains generic passthrough.
 
-### 2. Anthropic Compatibility Is A Real Translation Layer
+### 2. Anthropic Routes Use Native Passthrough For Claude Models
 
-**Files**: `src/server.rs`, `src/claude.rs`
+**Files**: `src/server.rs`, `src/claude.rs`, `src/amp.rs`
 
-`/v1/messages` is not a raw proxy. It:
+When the request model is a native Claude model (name contains `claude`, `sonnet`, `haiku`, or `opus`), both `/v1/messages` and `/v1/messages/count_tokens` forward the Anthropic request directly to Copilot's corresponding `/v1/messages` endpoint without any OpenAI conversion. Initiator and vision flags are still inferred from the Anthropic message history.
+
+For non-Claude models, the full translation layer applies:
 
 1. Optionally checks `ANTHROPIC_API_KEY`
 2. Converts the Anthropic request into OpenAI chat/completions format
@@ -304,7 +308,7 @@ Any other unsupported Amp fallback route returns `501 Not Implemented` with an `
 
 **File**: `src/amp.rs`
 
-For Amp Anthropic provider traffic, lightweight non-streaming user-initiated `haiku` requests are rewritten to `gpt-5-mini` before forwarding. This is intentionally limited to that path and is not applied to the direct `/v1/messages` route.
+For Amp Anthropic provider traffic, native Claude models are normally forwarded via Copilot `/v1/messages`. However, lightweight non-streaming user-initiated `haiku` requests are excluded from native passthrough and instead rewritten to `gpt-5-mini` through the OpenAI conversion path. This is intentionally limited to the Amp provider path and is not applied to the direct `/v1/messages` route.
 
 ### 6. Copilot Headers Are Mandatory
 
@@ -484,6 +488,6 @@ RUST_LOG=copilot_api_proxy=debug,tower_http=debug cargo run -- server
 ### Model-specific errors
 
 - `/v1/responses` depends on the selected upstream model supporting the Responses API
-- Anthropic compatibility routes ultimately target Copilot chat completions
+- Anthropic compatibility routes use native Copilot `/v1/messages` for Claude models and Copilot chat completions for others
 - Gemini compatibility routes ultimately target Copilot chat completions
 - Use `curl http://localhost:9876/v1/models | jq '.data[].id'` to inspect the upstream model list

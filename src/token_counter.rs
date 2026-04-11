@@ -55,22 +55,23 @@ async fn count_tokens_internal(body: &[u8]) -> Result<u64, Error> {
 
     // Add tool overhead if tools are present
     if let Some(tools) = anthropic_value.get("tools").and_then(|v| v.as_array())
-        && !tools.is_empty() {
-            // Check if any tool starts with "mcp__" (MCP tools don't count)
-            let has_mcp_tools = tools.iter().any(|tool| {
-                tool.get("name")
-                    .and_then(|v| v.as_str())
-                    .map(|name| name.starts_with("mcp__"))
-                    .unwrap_or(false)
-            });
+        && !tools.is_empty()
+    {
+        // Check if any tool starts with "mcp__" (MCP tools don't count)
+        let has_mcp_tools = tools.iter().any(|tool| {
+            tool.get("name")
+                .and_then(|v| v.as_str())
+                .map(|name| name.starts_with("mcp__"))
+                .unwrap_or(false)
+        });
 
-            if !has_mcp_tools {
-                // Add fixed overhead for tools
-                // Claude: ~346 tokens, Grok: ~480 tokens
-                // Use 400 as a reasonable middle ground
-                total_tokens += 400;
-            }
+        if !has_mcp_tools {
+            // Add fixed overhead for tools
+            // Claude: ~346 tokens, Grok: ~480 tokens
+            // Use 400 as a reasonable middle ground
+            total_tokens += 400;
         }
+    }
 
     // Apply model-specific multiplier
     let multiplier = if model.contains("claude") {

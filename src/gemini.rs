@@ -232,10 +232,7 @@ fn convert_user_parts(parts: &[Value], messages: &mut Vec<Value>) {
 
     // Function responses → tool messages
     for func_resp in &func_responses {
-        let name = func_resp
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let name = func_resp.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let response = func_resp
             .get("response")
             .cloned()
@@ -259,9 +256,7 @@ fn convert_user_parts(parts: &[Value], messages: &mut Vec<Value>) {
         } else {
             let mut content = Vec::new();
             if !text_parts.is_empty() {
-                content.push(
-                    serde_json::json!({"type": "text", "text": text_parts.join("")}),
-                );
+                content.push(serde_json::json!({"type": "text", "text": text_parts.join("")}));
             }
             content.extend(image_parts);
             messages.push(serde_json::json!({"role": "user", "content": content}));
@@ -278,10 +273,7 @@ fn convert_model_parts(parts: &[Value], messages: &mut Vec<Value>) {
             text_parts.push(text.to_string());
         }
         if let Some(func_call) = part.get("functionCall") {
-            let name = func_call
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let name = func_call.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = func_call
                 .get("args")
                 .cloned()
@@ -313,10 +305,7 @@ fn convert_model_parts(parts: &[Value], messages: &mut Vec<Value>) {
 fn convert_gemini_tools(tools: &[Value]) -> Vec<Value> {
     let mut openai_tools = Vec::new();
     for tool in tools {
-        let Some(decls) = tool
-            .get("functionDeclarations")
-            .and_then(|v| v.as_array())
-        else {
+        let Some(decls) = tool.get("functionDeclarations").and_then(|v| v.as_array()) else {
             continue;
         };
         for decl in decls {
@@ -463,29 +452,30 @@ fn convert_openai_response_to_gemini(value: &Value, model: &str) -> Value {
     let mut parts = Vec::new();
 
     if let Some(choice) = choice
-        && let Some(message) = choice.get("message") {
-            // Text content
-            if let Some(text) = message.get("content").and_then(|v| v.as_str())
-                && !text.is_empty() {
-                    parts.push(serde_json::json!({"text": text}));
-                }
-            // Tool calls → functionCall parts
-            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
-                for tc in tool_calls {
-                    if let Some(func) = tc.get("function") {
-                        let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        let args_str = func
-                            .get("arguments")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("{}");
-                        let args: Value =
-                            serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
-                        parts
-                            .push(serde_json::json!({"functionCall": {"name": name, "args": args}}));
-                    }
+        && let Some(message) = choice.get("message")
+    {
+        // Text content
+        if let Some(text) = message.get("content").and_then(|v| v.as_str())
+            && !text.is_empty()
+        {
+            parts.push(serde_json::json!({"text": text}));
+        }
+        // Tool calls → functionCall parts
+        if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+            for tc in tool_calls {
+                if let Some(func) = tc.get("function") {
+                    let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    let args_str = func
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+                    let args: Value =
+                        serde_json::from_str(args_str).unwrap_or(serde_json::json!({}));
+                    parts.push(serde_json::json!({"functionCall": {"name": name, "args": args}}));
                 }
             }
         }
+    }
 
     if parts.is_empty() {
         parts.push(serde_json::json!({"text": ""}));
@@ -542,10 +532,7 @@ fn parse_openai_error(bytes: &[u8]) -> Option<String> {
 // Streaming conversion: OpenAI SSE → Gemini SSE
 // ---------------------------------------------------------------------------
 
-fn stream_openai_to_gemini(
-    resp: reqwest::Response,
-    model: String,
-) -> Result<Response, Error> {
+fn stream_openai_to_gemini(resp: reqwest::Response, model: String) -> Result<Response, Error> {
     let status = resp.status();
     let upstream = resp.bytes_stream();
     let state = GeminiStreamState::new(upstream, model);
@@ -679,19 +666,20 @@ impl<S> GeminiStreamState<S> {
 
             // Emit text deltas immediately
             if let Some(content) = delta.get("content").and_then(|v| v.as_str())
-                && !content.is_empty() {
-                    let gemini_chunk = serde_json::json!({
-                        "candidates": [{
-                            "content": {
-                                "parts": [{"text": content}],
-                                "role": "model"
-                            }
-                        }],
-                        "modelVersion": self.model,
-                    });
-                    self.pending
-                        .push_back(Bytes::from(format!("data: {gemini_chunk}\n\n")));
-                }
+                && !content.is_empty()
+            {
+                let gemini_chunk = serde_json::json!({
+                    "candidates": [{
+                        "content": {
+                            "parts": [{"text": content}],
+                            "role": "model"
+                        }
+                    }],
+                    "modelVersion": self.model,
+                });
+                self.pending
+                    .push_back(Bytes::from(format!("data: {gemini_chunk}\n\n")));
+            }
         }
 
         // Handle finish
@@ -711,9 +699,7 @@ impl<S> GeminiStreamState<S> {
             if let Some(tc) = self.tool_calls.get(&idx) {
                 let args: Value =
                     serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
-                parts.push(
-                    serde_json::json!({"functionCall": {"name": tc.name, "args": args}}),
-                );
+                parts.push(serde_json::json!({"functionCall": {"name": tc.name, "args": args}}));
             }
         }
         self.tool_calls.clear();
@@ -786,10 +772,9 @@ mod tests {
 
     #[test]
     fn test_parse_gemini_action_publisher() {
-        let (model, method) = parse_gemini_action(
-            "publishers/google/models/gemini-3-pro-preview:generateContent",
-        )
-        .unwrap();
+        let (model, method) =
+            parse_gemini_action("publishers/google/models/gemini-3-pro-preview:generateContent")
+                .unwrap();
         assert_eq!(model, "gemini-3-pro-preview");
         assert_eq!(method, "generateContent");
     }
@@ -814,8 +799,7 @@ mod tests {
             }
         });
         let result =
-            convert_gemini_request("gemini-3-flash", Bytes::from(body.to_string()), false)
-                .unwrap();
+            convert_gemini_request("gemini-3-flash", Bytes::from(body.to_string()), false).unwrap();
         assert_eq!(result.model, "gemini-3-flash");
         assert!(!result.stream);
         assert_eq!(result.initiator, "user");
@@ -876,7 +860,10 @@ mod tests {
             }
         });
         let gemini = convert_openai_response_to_gemini(&openai_resp, "gemini-3-flash");
-        assert_eq!(gemini["candidates"][0]["content"]["parts"][0]["text"], "Hello there!");
+        assert_eq!(
+            gemini["candidates"][0]["content"]["parts"][0]["text"],
+            "Hello there!"
+        );
         assert_eq!(gemini["candidates"][0]["finishReason"], "STOP");
         assert_eq!(gemini["usageMetadata"]["promptTokenCount"], 5);
         assert_eq!(gemini["usageMetadata"]["candidatesTokenCount"], 3);
@@ -934,7 +921,10 @@ mod tests {
         assert_eq!(result["properties"]["tags"]["type"], "array");
         assert_eq!(result["properties"]["tags"]["items"]["type"], "string");
         assert_eq!(result["properties"]["nested"]["type"], "object");
-        assert_eq!(result["properties"]["nested"]["properties"]["flag"]["type"], "boolean");
+        assert_eq!(
+            result["properties"]["nested"]["properties"]["flag"]["type"],
+            "boolean"
+        );
     }
 
     #[test]
@@ -958,8 +948,7 @@ mod tests {
             }]
         });
         let result =
-            convert_gemini_request("gemini-2.5-pro", Bytes::from(body.to_string()), false)
-                .unwrap();
+            convert_gemini_request("gemini-2.5-pro", Bytes::from(body.to_string()), false).unwrap();
         let openai: Value = serde_json::from_slice(&result.body).unwrap();
         let params = &openai["tools"][0]["function"]["parameters"];
         assert_eq!(params["type"], "object");

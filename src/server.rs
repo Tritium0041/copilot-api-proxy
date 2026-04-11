@@ -3,9 +3,9 @@
 use crate::amp::AmpManagementProxy;
 use crate::amp_local::LocalAmpState;
 use crate::auth::TokenManager;
-use crate::web_backend::SearchProvider;
 use crate::claude::{
-    convert_claude_request, convert_openai_response, error_from_proxy, validate_anthropic_headers,
+    analyze_claude_request, convert_claude_request, convert_openai_response, error_from_proxy,
+    extract_anthropic_model, is_native_claude_model, validate_anthropic_headers,
 };
 use crate::error::Error;
 use crate::initiator::{
@@ -13,6 +13,7 @@ use crate::initiator::{
 };
 use crate::proxy::{ProxyClient, forward_response};
 use crate::token_counter::handle_count_tokens;
+use crate::web_backend::SearchProvider;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, Path, State};
@@ -97,6 +98,26 @@ async fn proxy_handler(
                 "Only POST is supported for /v1/messages/count_tokens".to_string(),
             )));
         }
+        if let Some(model) = extract_anthropic_model(&body)
+            && is_native_claude_model(&model)
+        {
+            let resp = match state
+                .proxy
+                .forward(
+                    &format!("/v1/messages/count_tokens{query}"),
+                    method,
+                    body,
+                    content_type,
+                    None,
+                    false,
+                )
+                .await
+            {
+                Ok(resp) => resp,
+                Err(err) => return Ok(error_from_proxy(err)),
+            };
+            return forward_response(resp).await;
+        }
         return handle_count_tokens(body).await;
     }
 
@@ -109,6 +130,29 @@ async fn proxy_handler(
 
         if let Some(resp) = validate_anthropic_headers(&headers) {
             return Ok(resp);
+        }
+
+        let metadata = match analyze_claude_request(&body) {
+            Ok(metadata) => metadata,
+            Err(err) => return Ok(error_from_proxy(err)),
+        };
+        if is_native_claude_model(&metadata.model) {
+            let resp = match state
+                .proxy
+                .forward(
+                    &format!("/v1/messages{}", query),
+                    method,
+                    body,
+                    content_type,
+                    Some(&metadata.initiator),
+                    metadata.is_vision,
+                )
+                .await
+            {
+                Ok(resp) => resp,
+                Err(err) => return Ok(error_from_proxy(err)),
+            };
+            return forward_response(resp).await;
         }
 
         let converted = match convert_claude_request(body) {

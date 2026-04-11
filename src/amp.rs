@@ -7,22 +7,27 @@
 //! Provider requests are handled locally through Copilot (OpenAI + Anthropic).
 //! Unknown providers and management requests are proxied to ampcode.com.
 
-use crate::claude::{convert_claude_request, convert_openai_response, error_from_proxy};
+use crate::claude::{
+    analyze_claude_request, convert_claude_request, convert_openai_response, error_from_proxy,
+    extract_anthropic_model, is_native_claude_model,
+};
 use crate::error::Error;
 use crate::gemini::{
     convert_gemini_request, convert_openai_to_gemini_response, handle_gemini_count_tokens,
     parse_gemini_action,
 };
-use crate::initiator::{analyze_openai_chat_completions, analyze_openai_responses, RequestAnalysis};
+use crate::initiator::{
+    RequestAnalysis, analyze_openai_chat_completions, analyze_openai_responses,
+};
 use crate::proxy::forward_response;
 use crate::server::AppState;
 use axum::Json;
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, Path, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::any;
-use axum::Router;
 use reqwest::Client;
 
 // ---------------------------------------------------------------------------
@@ -95,7 +100,8 @@ impl AmpManagementProxy {
         // Log request body if it's small and looks like JSON
         if body.len() > 0 && body.len() < 4096 {
             if let Ok(body_str) = std::str::from_utf8(&body) {
-                if body_str.trim_start().starts_with('{') || body_str.trim_start().starts_with('[') {
+                if body_str.trim_start().starts_with('{') || body_str.trim_start().starts_with('[')
+                {
                     tracing::debug!(
                         target: "amp_proxy",
                         body = %body_str,
@@ -133,7 +139,7 @@ impl AmpManagementProxy {
         }
 
         let resp = req.body(body).send().await?;
-        
+
         // Log the response details
         tracing::debug!(
             target: "amp_proxy",
@@ -276,35 +282,36 @@ async fn amp_api_handler(
     );
 
     if let Some(rest) = path.strip_prefix("provider/")
-        && let Some((provider, provider_path)) = rest.split_once('/') {
-            tracing::debug!(
-                target: "amp_proxy",
-                provider = %provider,
-                provider_path = %provider_path,
-                "Routing to provider handler"
-            );
-            return handle_provider(state, method, provider, provider_path, &uri, headers, body)
-                .await;
-        }
+        && let Some((provider, provider_path)) = rest.split_once('/')
+    {
+        tracing::debug!(
+            target: "amp_proxy",
+            provider = %provider,
+            provider_path = %provider_path,
+            "Routing to provider handler"
+        );
+        return handle_provider(state, method, provider, provider_path, &uri, headers, body).await;
+    }
 
     // When amp-local mode is enabled, handle management routes locally
     if let Some(ref local_state) = state.amp_local
-        && crate::amp_local::should_handle_locally(&path) {
-            tracing::debug!(
-                target: "amp_proxy",
-                path = %path,
-                "Handling locally with amp-local"
-            );
-            return crate::amp_local::handle_local_api(
-                local_state,
-                &method,
-                &path,
-                uri.query(),
-                &headers,
-                &body,
-            )
-            .await;
-        }
+        && crate::amp_local::should_handle_locally(&path)
+    {
+        tracing::debug!(
+            target: "amp_proxy",
+            path = %path,
+            "Handling locally with amp-local"
+        );
+        return crate::amp_local::handle_local_api(
+            local_state,
+            &method,
+            &path,
+            uri.query(),
+            &headers,
+            &body,
+        )
+        .await;
+    }
 
     let pq = uri
         .path_and_query()
@@ -461,13 +468,62 @@ async fn handle_anthropic(
     body: Bytes,
 ) -> Result<Response, Error> {
     let query = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let content_type = headers.get("content-type").and_then(|v| v.to_str().ok());
 
     match api_path {
         "messages/count_tokens" if method == Method::POST => {
+            if let Some(model) = extract_anthropic_model(&body)
+                && is_native_claude_model(&model)
+            {
+                let resp = match state
+                    .proxy
+                    .forward(
+                        &format!("/v1/messages/count_tokens{query}"),
+                        method,
+                        body,
+                        content_type,
+                        None,
+                        false,
+                    )
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return Ok(error_from_proxy(e)),
+                };
+                return forward_response(resp).await;
+            }
             crate::token_counter::handle_count_tokens(body).await
         }
         "messages" if method == Method::POST => {
+            let metadata = match analyze_claude_request(&body) {
+                Ok(m) => m,
+                Err(e) => return Ok(error_from_proxy(e)),
+            };
+
             // No validate_anthropic_headers for Amp path — auth is handled differently
+            // Keep the existing cost-saving rewrite path for lightweight user-initiated haiku.
+            let use_haiku_rewrite = !metadata.stream
+                && metadata.initiator == "user"
+                && metadata.model.to_lowercase().contains("haiku");
+            if is_native_claude_model(&metadata.model) && !use_haiku_rewrite {
+                let resp = match state
+                    .proxy
+                    .forward(
+                        &format!("/v1/messages{query}"),
+                        method,
+                        body,
+                        content_type,
+                        Some(&metadata.initiator),
+                        metadata.is_vision,
+                    )
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => return Ok(error_from_proxy(e)),
+                };
+                return forward_response(resp).await;
+            }
+
             let mut converted = match convert_claude_request(body) {
                 Ok(c) => c,
                 Err(e) => return Ok(error_from_proxy(e)),
@@ -609,15 +665,16 @@ async fn handle_google(
 /// Rewrite the "model" field in a JSON request body.
 fn rewrite_model_in_body(body: &Bytes, new_model: &str) -> Bytes {
     if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body)
-        && let Some(obj) = value.as_object_mut() {
-            obj.insert(
-                "model".to_string(),
-                serde_json::Value::String(new_model.to_string()),
-            );
-            if let Ok(bytes) = serde_json::to_vec(&value) {
-                return Bytes::from(bytes);
-            }
+        && let Some(obj) = value.as_object_mut()
+    {
+        obj.insert(
+            "model".to_string(),
+            serde_json::Value::String(new_model.to_string()),
+        );
+        if let Ok(bytes) = serde_json::to_vec(&value) {
+            return Bytes::from(bytes);
         }
+    }
     body.clone()
 }
 

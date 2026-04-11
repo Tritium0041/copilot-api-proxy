@@ -1,6 +1,6 @@
 # copilot-api-proxy
 
-A reverse proxy for GitHub Copilot that exposes OpenAI-compatible `/v1/*` routes, an Anthropic-compatible `/v1/messages` surface, and Amp provider routes for OpenAI, Anthropic, and Gemini. OpenAI requests are forwarded mostly unchanged; Anthropic and Gemini compatibility routes translate to Copilot's OpenAI-style upstream. An optional `--amp-local` mode serves part of Amp's management API from local thread data with pluggable web search backends.
+A reverse proxy for GitHub Copilot that exposes OpenAI-compatible `/v1/*` routes, an Anthropic-compatible `/v1/messages` surface with native Claude model passthrough, and Amp provider routes for OpenAI, Anthropic, and Gemini. OpenAI requests are forwarded mostly unchanged; native Claude models on Anthropic routes are forwarded directly while non-Claude Anthropic and Gemini compatibility routes translate to Copilot's OpenAI-style upstream. An optional `--amp-local` mode serves part of Amp's management API from local thread data with pluggable web search backends.
 
 > [!WARNING]
 > This is a reverse-engineered proxy of GitHub Copilot API. It is not supported by GitHub, and may break unexpectedly. Use at your own risk.
@@ -22,7 +22,7 @@ A reverse proxy for GitHub Copilot that exposes OpenAI-compatible `/v1/*` routes
 ## Features
 
 - OpenAI-compatible passthrough on `/v1/*`
-- Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens`
+- Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens` with native Claude model passthrough
 - Amp provider routes for OpenAI, Anthropic, and Gemini clients
 - Amp management proxy by default for `/api/*` and RSS routes, plus browser redirects for `/threads*`, `/auth*`, `/docs*`, and `/settings*`
 - Optional `--amp-local` mode for local `/api/threads/*`, `/api/internal`, telemetry, labels, and user info endpoints, with strict fallback blocking for unsupported Amp routes
@@ -88,11 +88,11 @@ Use `http://localhost:9876` as the base URL for OpenAI-compatible and Anthropic-
 | Route | Method | Behavior |
 |-------|--------|----------|
 | `/v1/{*path}` | Any | Forwards to `https://api.individual.githubcopilot.com/{*path}` after stripping `/v1/`. `/chat/completions` and `/responses` get initiator and vision inference. |
-| `/v1/messages` | POST | Converts Anthropic Messages API requests to OpenAI chat/completions and converts responses back to Anthropic format. |
-| `/v1/messages/count_tokens` | POST | Estimates Anthropic input tokens locally with `tiktoken-rs`. |
+| `/v1/messages` | POST | Native Claude models are forwarded directly to Copilot `/v1/messages`; other models are converted to OpenAI chat/completions and back. |
+| `/v1/messages/count_tokens` | POST | Native Claude models are forwarded to Copilot `/v1/messages/count_tokens`; other models use local `tiktoken-rs` estimation. |
 | `/api/provider/openai/{version}/{*path}` | Any | Amp OpenAI provider routes proxied through Copilot. |
-| `/api/provider/anthropic/{version}/messages` | POST | Amp Anthropic provider route converted through Copilot. |
-| `/api/provider/anthropic/{version}/messages/count_tokens` | POST | Local Anthropic token counting for Amp clients. |
+| `/api/provider/anthropic/{version}/messages` | POST | Native Claude models forwarded via Copilot `/v1/messages` (except lightweight user-initiated haiku which is rewritten to `gpt-5-mini`); other models converted through Copilot `/chat/completions`. |
+| `/api/provider/anthropic/{version}/messages/count_tokens` | POST | Native Claude models forwarded to Copilot `/v1/messages/count_tokens`; other models use local token estimation. |
 | `/api/provider/google/{version}/models/{model}:{action}` | POST | Gemini `generateContent`, `streamGenerateContent`, and `countTokens` translated through Copilot. |
 | `/api/threads/find`, `/api/threads/{id}.md`, `/api/internal`, `/api/telemetry`, `/api/durable-thread-workers/*`, `/api/users/*`, `/api/attachments` | Varies | Handled locally only when `--amp-local` is enabled. |
 | `/news.rss` | Any | Proxied to Amp upstream by default. Served as a small local RSS stub when `--amp-local` is enabled. |
@@ -260,7 +260,7 @@ Available search backends for local mode:
 2. The server exchanges that GitHub token for a Copilot API token.
 3. `TokenManager` refreshes the Copilot token in the background before expiry.
 4. OpenAI-compatible `/v1/*` requests are forwarded to `api.individual.githubcopilot.com` with Copilot headers injected.
-5. Anthropic and Gemini compatibility routes translate request and response formats around the same Copilot upstream.
+5. Native Claude models on Anthropic routes are forwarded directly to Copilot's `/v1/messages` endpoint; non-Claude Anthropic models and Gemini compatibility routes translate request and response formats around the same Copilot upstream.
 6. Amp provider routes are handled locally when supported; Amp management routes are proxied to `ampcode.com` by default, while `--amp-local` serves the supported local `/api/*` subset, stubs `/news.rss`, and rejects other Amp fallbacks with `501 Not Implemented`.
 
 ### Sticky Inference

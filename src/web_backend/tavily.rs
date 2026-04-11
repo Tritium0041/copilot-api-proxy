@@ -45,21 +45,41 @@ impl WebBackend for TavilyBackend {
                     "include_answer": false,
                 });
 
-                match self.http.post("https://api.tavily.com/search").json(&body).send().await {
+                match self
+                    .http
+                    .post("https://api.tavily.com/search")
+                    .json(&body)
+                    .send()
+                    .await
+                {
                     Ok(resp) if resp.status().is_success() => {
                         let body: serde_json::Value =
                             resp.json().await.unwrap_or(serde_json::Value::Null);
                         if let Some(items) = body.get("results").and_then(|r| r.as_array()) {
                             for item in items {
                                 results.push(SearchResult {
-                                    title: item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                                    url: item.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-                                    content: item.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                                    title: item
+                                        .get("title")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    url: item
+                                        .get("url")
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    content: item
+                                        .get("content")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
                                 });
                             }
                         }
                     }
-                    Ok(resp) => tracing::warn!("Tavily search failed for {:?}: {}", query, resp.status()),
+                    Ok(resp) => {
+                        tracing::warn!("Tavily search failed for {:?}: {}", query, resp.status())
+                    }
                     Err(e) => tracing::warn!("Tavily request failed for {:?}: {}", query, e),
                 }
 

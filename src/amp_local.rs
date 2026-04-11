@@ -19,10 +19,10 @@
 
 use crate::proxy::ProxyClient;
 use crate::web_backend::{self, SearchProvider, WebBackend};
+use axum::Json;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -221,14 +221,16 @@ async fn read_thread_index_entry(path: &Path) -> Option<IndexedThread> {
     if let Some(msgs) = messages {
         for msg in msgs.iter().take(20) {
             if (msg.role.as_deref() == Some("user") || msg.role.as_deref() == Some("assistant"))
-                && let Some(ref content) = msg.content {
-                    for block in content {
-                        if block.content_type.as_deref() == Some("text")
-                            && let Some(ref text) = block.text {
-                                search_parts.push(text.clone());
-                            }
+                && let Some(ref content) = msg.content
+            {
+                for block in content {
+                    if block.content_type.as_deref() == Some("text")
+                        && let Some(ref text) = block.text
+                    {
+                        search_parts.push(text.clone());
                     }
                 }
+            }
         }
     }
 
@@ -239,9 +241,10 @@ async fn read_thread_index_entry(path: &Path) -> Option<IndexedThread> {
         for msg in msgs.iter().rev().take(5) {
             if let Some(ref meta) = msg.meta
                 && let Some(sent) = meta.get("sentAt").and_then(|v| v.as_u64())
-                    && sent > updated_at {
-                        updated_at = sent;
-                    }
+                && sent > updated_at
+            {
+                updated_at = sent;
+            }
         }
     }
 
@@ -274,7 +277,10 @@ fn amp_threads_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local").join("share").join("amp").join("threads")
+    home.join(".local")
+        .join("share")
+        .join("amp")
+        .join("threads")
 }
 
 fn amp_data_dir() -> PathBuf {
@@ -361,11 +367,7 @@ pub async fn handle_local_api(
 
     // /api/attachments
     if path == "attachments" {
-        return Ok((
-            StatusCode::OK,
-            Json(serde_json::json!({"attachments": []})),
-        )
-            .into_response());
+        return Ok((StatusCode::OK, Json(serde_json::json!({"attachments": []}))).into_response());
     }
 
     // Fallback
@@ -394,22 +396,20 @@ async fn handle_thread_search(
     state.ensure_index().await;
 
     let params: ThreadSearchParams = query_str
-        .map(|q| serde_urlencoded::from_str(q).unwrap_or(ThreadSearchParams {
-            q: None,
-            limit: None,
-            offset: None,
-        }))
+        .map(|q| {
+            serde_urlencoded::from_str(q).unwrap_or(ThreadSearchParams {
+                q: None,
+                limit: None,
+                offset: None,
+            })
+        })
         .unwrap_or(ThreadSearchParams {
             q: None,
             limit: None,
             offset: None,
         });
 
-    let query_lower = params
-        .q
-        .as_deref()
-        .unwrap_or("")
-        .to_lowercase();
+    let query_lower = params.q.as_deref().unwrap_or("").to_lowercase();
     let limit = params.limit.unwrap_or(20).min(100);
     let offset = params.offset.unwrap_or(0);
 
@@ -527,11 +527,7 @@ async fn handle_thread_markdown(
     let data = match tokio::fs::read(&path).await {
         Ok(d) => d,
         Err(_) => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                format!("Thread {} not found", id),
-            )
-                .into_response());
+            return Ok((StatusCode::NOT_FOUND, format!("Thread {} not found", id)).into_response());
         }
     };
 
@@ -550,7 +546,10 @@ async fn handle_thread_markdown(
 
     Ok((
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/markdown; charset=utf-8",
+        )],
         markdown,
     )
         .into_response())
@@ -574,32 +573,35 @@ fn thread_to_markdown(thread: &ThreadFile, truncate_tool_results: bool) -> Strin
     // Environment info
     if let Some(ref env) = thread.env
         && let Some(initial) = env.get("initial")
-            && let Some(trees) = initial.get("trees").and_then(|t| t.as_array())
-                && !trees.is_empty() {
-                    md.push_str("\n## Workspace\n\n");
-                    for tree in trees {
-                        if let Some(name) = tree.get("displayName").and_then(|n| n.as_str()) {
-                            md.push_str(&format!("- {}", name));
-                            if let Some(repo) = tree.get("repository")
-                                && let Some(url) = repo.get("url").and_then(|u| u.as_str()) {
-                                    md.push_str(&format!(" ({})", url));
-                                }
-                            md.push('\n');
-                        }
-                    }
+        && let Some(trees) = initial.get("trees").and_then(|t| t.as_array())
+        && !trees.is_empty()
+    {
+        md.push_str("\n## Workspace\n\n");
+        for tree in trees {
+            if let Some(name) = tree.get("displayName").and_then(|n| n.as_str()) {
+                md.push_str(&format!("- {}", name));
+                if let Some(repo) = tree.get("repository")
+                    && let Some(url) = repo.get("url").and_then(|u| u.as_str())
+                {
+                    md.push_str(&format!(" ({})", url));
                 }
+                md.push('\n');
+            }
+        }
+    }
 
     // Skills
     if let Some(ref skills) = thread.activated_skills
-        && !skills.is_empty() {
-            let names: Vec<String> = skills
-                .iter()
-                .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect();
-            if !names.is_empty() {
-                md.push_str(&format!("\nSkills used: {}\n", names.join(", ")));
-            }
+        && !skills.is_empty()
+    {
+        let names: Vec<String> = skills
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(String::from))
+            .collect();
+        if !names.is_empty() {
+            md.push_str(&format!("\nSkills used: {}\n", names.join(", ")));
         }
+    }
 
     md.push_str("\n---\n\n");
 
@@ -652,8 +654,7 @@ fn thread_to_markdown(thread: &ThreadFile, truncate_tool_results: bool) -> Strin
                             } else if let Some(ref content) = block.content {
                                 let content_str = match content {
                                     serde_json::Value::String(s) => s.clone(),
-                                    _ => serde_json::to_string_pretty(content)
-                                        .unwrap_or_default(),
+                                    _ => serde_json::to_string_pretty(content).unwrap_or_default(),
                                 };
                                 if content_str.len() > 2000 {
                                     md.push_str(&format!(
@@ -710,7 +711,16 @@ fn chrono_format_millis(millis: u64) -> String {
     let days_in_months: [i64; 12] = [
         31,
         if is_leap { 29 } else { 28 },
-        31, 30, 31, 30, 31, 31, 30, 31, 30, 31,
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
     ];
 
     let mut month = 1;
@@ -780,20 +790,16 @@ async fn handle_internal_rpc(
             }))
             .into_response())
         }
-        "github-auth-status" => {
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "result": { "authenticated": true }
-            }))
-            .into_response())
-        }
-        "userDisplayBalanceInfo" => {
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "result": null
-            }))
-            .into_response())
-        }
+        "github-auth-status" => Ok(Json(serde_json::json!({
+            "ok": true,
+            "result": { "authenticated": true }
+        }))
+        .into_response()),
+        "userDisplayBalanceInfo" => Ok(Json(serde_json::json!({
+            "ok": true,
+            "result": null
+        }))
+        .into_response()),
         "markAsReadMysteriousMessage" => ok_null(),
 
         // ── Thread CRUD ─────────────────────────────────────────────
@@ -818,22 +824,18 @@ async fn handle_internal_rpc(
         "getThreadLabels" => handle_get_thread_labels(body).await,
         "setThreadLabels" => handle_set_thread_labels(body).await,
         "addThreadLabels" => handle_add_thread_labels(body).await,
-        "getUserLabels" => {
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "result": []
-            }))
-            .into_response())
-        }
+        "getUserLabels" => Ok(Json(serde_json::json!({
+            "ok": true,
+            "result": []
+        }))
+        .into_response()),
 
         // ── Cost / billing ──────────────────────────────────────────
-        "threadDisplayCostInfo" => {
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "result": null
-            }))
-            .into_response())
-        }
+        "threadDisplayCostInfo" => Ok(Json(serde_json::json!({
+            "ok": true,
+            "result": null
+        }))
+        .into_response()),
 
         // ── Task management ─────────────────────────────────────────
         "createTask" | "updateTask" | "deleteTask" | "getTask" | "listTasks" => {
@@ -884,9 +886,10 @@ async fn read_device_id() -> String {
     let path = amp_data_dir().join("device-id.json");
     if let Ok(data) = tokio::fs::read(&path).await
         && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&data)
-            && let Some(id) = v.get("installationID").and_then(|i| i.as_str()) {
-                return id.to_string();
-            }
+        && let Some(id) = v.get("installationID").and_then(|i| i.as_str())
+    {
+        return id.to_string();
+    }
     "local-user".to_string()
 }
 
@@ -930,7 +933,8 @@ async fn handle_get_thread(
             Ok(Json(serde_json::json!({
                 "ok": true,
                 "result": { "thread": { "data": thread } }
-            })).into_response())
+            }))
+            .into_response())
         }
         Err(_) => Ok(Json(serde_json::json!({
             "ok": false,
@@ -1001,10 +1005,7 @@ fn maybe_decompress(headers: &HeaderMap, body: &Bytes) -> Result<Vec<u8>, String
     Ok(decompressed)
 }
 
-fn parse_rpc_body(
-    headers: &HeaderMap,
-    body: &Bytes,
-) -> Result<serde_json::Value, Response> {
+fn parse_rpc_body(headers: &HeaderMap, body: &Bytes) -> Result<serde_json::Value, Response> {
     let raw = maybe_decompress(headers, body).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -1114,10 +1115,7 @@ async fn handle_set_thread_meta(
     };
 
     let params = parsed.get("params").unwrap_or(&parsed);
-    let thread_id = params
-        .get("thread")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let thread_id = params.get("thread").and_then(|v| v.as_str()).unwrap_or("");
     if thread_id.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -1160,9 +1158,7 @@ async fn handle_set_thread_meta(
 
     // Merge new_meta into thread.meta (create if absent)
     if let Some(obj) = thread.as_object_mut() {
-        let existing_meta = obj
-            .entry("meta")
-            .or_insert_with(|| serde_json::json!({}));
+        let existing_meta = obj.entry("meta").or_insert_with(|| serde_json::json!({}));
         if let (Some(existing), Some(new)) = (existing_meta.as_object_mut(), new_meta.as_object()) {
             for (k, v) in new {
                 existing.insert(k.clone(), v.clone());
@@ -1202,10 +1198,7 @@ async fn handle_delete_thread(
     };
 
     let params = parsed.get("params").unwrap_or(&parsed);
-    let thread_id = params
-        .get("thread")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let thread_id = params.get("thread").and_then(|v| v.as_str()).unwrap_or("");
     if thread_id.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -1490,15 +1483,13 @@ async fn read_local_labels(thread_id: &str) -> Vec<serde_json::Value> {
     let path = amp_data_dir().join("labels.json");
     if let Ok(data) = tokio::fs::read(&path).await
         && let Ok(all) = serde_json::from_slice::<serde_json::Value>(&data)
-            && let Some(labels) = all.get(thread_id).and_then(|l| l.as_array()) {
-                return labels
-                    .iter()
-                    .filter_map(|l| {
-                        l.as_str()
-                            .map(|name| serde_json::json!({"name": name}))
-                    })
-                    .collect();
-            }
+        && let Some(labels) = all.get(thread_id).and_then(|l| l.as_array())
+    {
+        return labels
+            .iter()
+            .filter_map(|l| l.as_str().map(|name| serde_json::json!({"name": name})))
+            .collect();
+    }
     vec![]
 }
 

@@ -56,14 +56,28 @@ impl WebBackend for SearxngBackend {
                         if let Some(items) = body.get("results").and_then(|r| r.as_array()) {
                             for item in items {
                                 results.push(SearchResult {
-                                    title: item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                                    url: item.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string(),
-                                    content: item.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+                                    title: item
+                                        .get("title")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    url: item
+                                        .get("url")
+                                        .and_then(|u| u.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    content: item
+                                        .get("content")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
                                 });
                             }
                         }
                     }
-                    Ok(r) => tracing::warn!("SearXNG search failed for {:?}: {}", query, r.status()),
+                    Ok(r) => {
+                        tracing::warn!("SearXNG search failed for {:?}: {}", query, r.status())
+                    }
                     Err(e) => tracing::warn!("SearXNG request failed for {:?}: {}", query, e),
                 }
 

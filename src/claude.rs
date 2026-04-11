@@ -45,6 +45,35 @@ pub struct ClaudeConvertedRequest {
     pub is_vision: bool,
 }
 
+pub struct ClaudeRequestMetadata {
+    pub model: String,
+    pub stream: bool,
+    pub initiator: String, // "user" or "agent"
+    pub is_vision: bool,
+}
+
+pub fn analyze_claude_request(body: &[u8]) -> Result<ClaudeRequestMetadata, Error> {
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|e| Error::InvalidRequest(format!("Invalid JSON body: {e}")))?;
+    analyze_claude_value(&value)
+}
+
+pub fn extract_anthropic_model(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    value
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string)
+}
+
+pub fn is_native_claude_model(model: &str) -> bool {
+    let model = model.to_lowercase();
+    model.contains("claude")
+        || model.contains("sonnet")
+        || model.contains("haiku")
+        || model.contains("opus")
+}
+
 pub fn validate_anthropic_headers(headers: &HeaderMap) -> Option<Response> {
     let expected = std::env::var("ANTHROPIC_API_KEY")
         .ok()
@@ -67,6 +96,22 @@ pub fn convert_claude_request(body: Bytes) -> Result<ClaudeConvertedRequest, Err
     let value: Value = serde_json::from_slice(&body)
         .map_err(|e| Error::InvalidRequest(format!("Invalid JSON body: {e}")))?;
 
+    let metadata = analyze_claude_value(&value)?;
+
+    let openai_body = convert_claude_value_to_openai(&value)?;
+    let body_bytes = serde_json::to_vec(&openai_body)
+        .map_err(|e| Error::InvalidRequest(format!("Failed to serialize OpenAI request: {e}")))?;
+
+    Ok(ClaudeConvertedRequest {
+        model: metadata.model,
+        stream: metadata.stream,
+        body: Bytes::from(body_bytes),
+        initiator: metadata.initiator,
+        is_vision: metadata.is_vision,
+    })
+}
+
+fn analyze_claude_value(value: &Value) -> Result<ClaudeRequestMetadata, Error> {
     let model = value
         .get("model")
         .and_then(|v| v.as_str())
@@ -78,14 +123,12 @@ pub fn convert_claude_request(body: Bytes) -> Result<ClaudeConvertedRequest, Err
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Determine initiator from message history
     let messages = value
         .get("messages")
         .and_then(|v| v.as_array())
         .ok_or_else(|| Error::InvalidRequest("Missing required field: messages".to_string()))?;
-    let initiator = infer_initiator(messages);
+    let initiator = infer_initiator(messages).to_string();
 
-    // Check for image content in messages
     let is_vision = messages.iter().any(|msg| {
         msg.get("content")
             .and_then(|c| c.as_array())
@@ -97,15 +140,10 @@ pub fn convert_claude_request(body: Bytes) -> Result<ClaudeConvertedRequest, Err
             .unwrap_or(false)
     });
 
-    let openai_body = convert_claude_value_to_openai(&value)?;
-    let body_bytes = serde_json::to_vec(&openai_body)
-        .map_err(|e| Error::InvalidRequest(format!("Failed to serialize OpenAI request: {e}")))?;
-
-    Ok(ClaudeConvertedRequest {
+    Ok(ClaudeRequestMetadata {
         model,
         stream,
-        body: Bytes::from(body_bytes),
-        initiator: initiator.to_string(),
+        initiator,
         is_vision,
     })
 }
@@ -640,6 +678,62 @@ fn stream_openai_to_claude(
         .header("connection", "keep-alive")
         .body(Body::from_stream(stream))
         .map_err(|e| Error::InvalidRequest(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn analyze_claude_request_sets_user_initiator() {
+        let body = json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let metadata = analyze_claude_request(body.to_string().as_bytes()).unwrap();
+        assert_eq!(metadata.initiator, "user");
+        assert!(!metadata.is_vision);
+    }
+
+    #[test]
+    fn analyze_claude_request_sets_agent_initiator() {
+        let body = json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi"},
+                {"role": "user", "content": "Continue"}
+            ]
+        });
+
+        let metadata = analyze_claude_request(body.to_string().as_bytes()).unwrap();
+        assert_eq!(metadata.initiator, "agent");
+        assert!(!metadata.is_vision);
+    }
+
+    #[test]
+    fn analyze_claude_request_detects_vision() {
+        let body = json!({
+            "model": "claude-sonnet-4-20250514",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is this?"},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+                    ]
+                }
+            ]
+        });
+
+        let metadata = analyze_claude_request(body.to_string().as_bytes()).unwrap();
+        assert_eq!(metadata.initiator, "user");
+        assert!(metadata.is_vision);
+    }
 }
 
 fn error_response(status: StatusCode, error_type: &str, message: &str) -> Response {
