@@ -132,6 +132,7 @@ struct CopilotToken {
 
 /// Thread-safe token manager with background refresh
 pub struct TokenManager {
+    github_token: String,
     copilot_token: Arc<RwLock<Option<CopilotToken>>>,
     refresh_handle: JoinHandle<()>,
 }
@@ -140,9 +141,10 @@ impl TokenManager {
     pub async fn new(github_token: String) -> Result<Self, Error> {
         let initial = Self::fetch_token(&github_token).await?;
         let copilot_token = Arc::new(RwLock::new(Some(initial)));
-        let refresh_handle = Self::spawn_refresh(github_token, Arc::clone(&copilot_token));
+        let refresh_handle = Self::spawn_refresh(github_token.clone(), Arc::clone(&copilot_token));
 
         Ok(Self {
+            github_token,
             copilot_token,
             refresh_handle,
         })
@@ -164,6 +166,29 @@ impl TokenManager {
             .as_ref()
             .map(|t| t.api_base.clone())
             .ok_or_else(|| Error::Auth("No token available".into()))
+    }
+
+    /// Force an immediate token refresh (e.g. after receiving a 401 from upstream).
+    ///
+    /// The caller passes the `stale_token` that triggered the 401. Holding the
+    /// write lock for the duration prevents concurrent refreshes — if another
+    /// caller already refreshed, the token won't match and we skip.
+    pub async fn force_refresh(&self, stale_token: &str) -> Result<(), Error> {
+        let mut guard = self.copilot_token.write().await;
+
+        // Another caller may have already refreshed while we waited for the lock.
+        if let Some(current) = guard.as_ref() {
+            if current.token != stale_token {
+                tracing::debug!("Token already refreshed by another request, skipping");
+                return Ok(());
+            }
+        }
+
+        tracing::info!("Forcing Copilot token refresh");
+        let new = Self::fetch_token(&self.github_token).await?;
+        *guard = Some(new);
+        tracing::info!("Forced Copilot token refresh succeeded");
+        Ok(())
     }
 
     async fn fetch_token(github_token: &str) -> Result<CopilotToken, Error> {

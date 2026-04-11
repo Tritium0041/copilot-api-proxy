@@ -48,17 +48,47 @@ impl ProxyClient {
         let token = self.token_manager.get_token().await?;
         let api_base = self.token_manager.get_api_base().await?;
 
+        let resp = self
+            .send_request(&api_base, path, method.clone(), &body, content_type, &token, initiator, is_vision)
+            .await?;
+
+        // On 401, force-refresh the Copilot token and retry once (handles sleep/wake expiry)
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            tracing::warn!("Received 401 from upstream, attempting token refresh and retry");
+            if self.token_manager.force_refresh(&token).await.is_ok() {
+                let new_token = self.token_manager.get_token().await?;
+                let new_api_base = self.token_manager.get_api_base().await?;
+                return self
+                    .send_request(&new_api_base, path, method, &body, content_type, &new_token, initiator, is_vision)
+                    .await;
+            }
+        }
+
+        Ok(resp)
+    }
+
+    async fn send_request(
+        &self,
+        api_base: &str,
+        path: &str,
+        method: reqwest::Method,
+        body: &Bytes,
+        content_type: Option<&str>,
+        token: &str,
+        initiator: Option<&str>,
+        is_vision: bool,
+    ) -> Result<reqwest::Response, Error> {
         let mut req = self
             .client
             .request(method, format!("{}{}", api_base, path))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .headers(copilot_headers(initiator, is_vision));
 
         if let Some(ct) = content_type {
             req = req.header("Content-Type", ct);
         }
 
-        Ok(req.body(body).send().await?)
+        Ok(req.body(body.clone()).send().await?)
     }
 }
 
