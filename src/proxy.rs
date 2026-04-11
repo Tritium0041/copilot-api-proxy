@@ -64,7 +64,7 @@ impl ProxyClient {
 
 fn copilot_headers(initiator: Option<&str>, is_vision: bool) -> HeaderMap {
     let mut h = HeaderMap::new();
-    h.insert("editor-version", HeaderValue::from_static("vscode/1.98.1"));
+    h.insert("editor-version", HeaderValue::from_static("vscode/1.114.0"));
     h.insert(
         "editor-plugin-version",
         HeaderValue::from_static("copilot-chat/0.26.7"),
@@ -75,7 +75,7 @@ fn copilot_headers(initiator: Option<&str>, is_vision: bool) -> HeaderMap {
     );
     h.insert(
         "x-github-api-version",
-        HeaderValue::from_static("2025-04-01"),
+        HeaderValue::from_static("2025-05-01"),
     );
     h.insert(
         "copilot-integration-id",
@@ -83,7 +83,7 @@ fn copilot_headers(initiator: Option<&str>, is_vision: bool) -> HeaderMap {
     );
     h.insert(
         "openai-intent",
-        HeaderValue::from_static("conversation-panel"),
+        HeaderValue::from_static("conversation-agent"),
     );
 
     // X-Initiator: "user" consumes premium, "agent" does not

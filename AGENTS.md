@@ -316,12 +316,12 @@ For Amp Anthropic provider traffic, native Claude models are normally forwarded 
 
 Every upstream Copilot request injects headers that emulate the VS Code Copilot extension:
 
-- `editor-version: vscode/1.98.1`
+- `editor-version: vscode/1.114.0`
 - `editor-plugin-version: copilot-chat/0.26.7`
 - `user-agent: GitHubCopilotChat/0.26.7`
-- `x-github-api-version: 2025-04-01`
+- `x-github-api-version: 2025-05-01`
 - `copilot-integration-id: vscode-chat`
-- `openai-intent: conversation-panel`
+- `openai-intent: conversation-agent`
 
 The proxy also sets:
 
@@ -419,10 +419,10 @@ GitHub OAuth token -> Copilot API token:
 GET https://api.github.com/copilot_internal/v2/token
 Authorization: token {github_token}
 Accept: application/json
-editor-version: vscode/1.98.1
+editor-version: vscode/1.114.0
 editor-plugin-version: copilot-chat/0.26.7
 user-agent: GitHubCopilotChat/0.26.7
-x-github-api-version: 2025-04-01
+x-github-api-version: 2025-05-01
 ```
 
 Expected response shape:

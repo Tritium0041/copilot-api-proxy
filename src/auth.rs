@@ -109,10 +109,10 @@ async fn exchange_token(github_token: &str) -> Result<TokenExchangeResponse, Err
         .get("https://api.github.com/copilot_internal/v2/token")
         .header("Authorization", format!("token {}", github_token))
         .header("Accept", "application/json")
-        .header("editor-version", "vscode/1.98.1")
+        .header("editor-version", "vscode/1.114.0")
         .header("editor-plugin-version", "copilot-chat/0.26.7")
         .header("user-agent", "GitHubCopilotChat/0.26.7")
-        .header("x-github-api-version", "2025-04-01")
+        .header("x-github-api-version", "2025-05-01")
         .send()
         .await?
         .json()
