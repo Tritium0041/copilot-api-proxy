@@ -7,6 +7,8 @@
 //! Provider requests are handled locally through Copilot (OpenAI + Anthropic).
 //! Unknown providers and management requests are proxied to ampcode.com.
 
+pub mod local;
+
 use crate::claude::{analyze_claude_request, convert_claude_request, error_from_proxy};
 use crate::error::Error;
 use crate::gemini::{handle_gemini_count_tokens, parse_gemini_action};
@@ -285,14 +287,14 @@ pub async fn handle_api_request(
 
     // When amp-local mode is enabled, handle management routes locally
     if let Some(ref local_state) = state.amp_local
-        && crate::amp_local::should_handle_locally(&path)
+        && local::should_handle_locally(&path)
     {
         tracing::debug!(
             target: "amp_proxy",
             path = %path,
             "Handling locally with amp-local"
         );
-        return crate::amp_local::handle_local_api(
+        return local::handle_local_api(
             local_state,
             &method,
             &path,

@@ -407,7 +407,7 @@ mod tests {
         )
         .unwrap();
 
-        let state = crate::droid_local::LocalDroidState {
+        let state = super::LocalDroidState {
             user_id: "u".to_string(),
             org_id: "o".to_string(),
             factory_home: factory_home.clone(),

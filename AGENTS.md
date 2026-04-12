@@ -13,7 +13,7 @@
 
 - Keep OpenAI-compatible routes as raw-byte passthrough whenever possible.
 - Do protocol translation only on explicit compatibility surfaces for non-Claude models such as `/v1/messages`, `/v1/messages/count_tokens`, and Amp Anthropic / Gemini provider routes. Native Claude models on Anthropic routes are forwarded directly.
-- Route ownership should stay explicit. `src/api.rs` owns the top-level `/api/*` split, while `src/amp.rs` and `src/droid.rs` own only their respective compatibility surfaces.
+- Route ownership should stay explicit. `src/api.rs` owns the top-level `/api/*` split, while `src/amp/mod.rs` and `src/droid/mod.rs` own only their respective compatibility surfaces.
 - Proxy Amp management traffic to `ampcode.com` by default. In `--amp-local` mode, serve the supported local `/api/*` subset, stub `/news.rss`, and fail loudly for unsupported Amp fallbacks instead of proxying them upstream.
 - Handle Droid `/api/llm/*` routes locally through Copilot-compatible adapters in all modes. Proxy non-LLM Droid control-plane traffic to Factory by default. In `--droid-local` mode, serve the supported local control-plane subset and fail loudly for unsupported Droid fallbacks instead of proxying them upstream.
 - Limit request inspection to the minimum needed for sticky inference and vision detection.
@@ -172,14 +172,14 @@ Axum Router
 1. **Generic OpenAI passthrough remains the default**. `/v1/{*path}` and Amp/Droid OpenAI-like routes forward raw bytes and avoid schema models where possible.
 2. **Top-level API routing is centralized**. `src/api.rs` owns `/api/{*path}` dispatch and delegates to Amp or Droid modules.
 3. **Compatibility logic is isolated**. Anthropic conversion lives in `src/claude.rs`; Gemini conversion lives in `src/gemini.rs`; shared LLM route handlers live in `src/llm.rs`; token estimation lives in `src/token_counter.rs`.
-4. **Amp and Droid integrations are split cleanly**. `src/amp.rs` owns Amp-specific provider and management behavior; `src/droid.rs` owns Droid-specific behavior; local management subsets live in `src/amp_local.rs` and `src/droid_local.rs`.
+4. **Amp and Droid integrations are split cleanly**. `src/amp/mod.rs` owns Amp-specific provider and management behavior; `src/droid/mod.rs` owns Droid-specific behavior; local management subsets live in `src/amp/local.rs` and `src/droid/local.rs`.
 5. **Sticky inference is opt-in by route**. Only chat/responses-style requests are inspected for `X-Initiator` and vision headers.
 6. **Token refresh is background-managed**. `TokenManager` owns the Copilot token lifecycle and refreshes automatically.
 7. **Response forwarding is unified**. `forward_response()` handles both buffered and SSE responses while stripping hop-by-hop headers.
 8. **The server enforces a 10 MiB body limit** with `RequestBodyLimitLayer` and enables request tracing with `TraceLayer`.
-9. **Local Amp mode is opt-in and strict**. `--amp-local` enables `src/amp_local.rs` for thread search, markdown export, internal RPCs, telemetry, labels, attachments, durable thread workers, and user info backed by local Amp data. It also serves a local `/news.rss` stub. Any other unsupported Amp fallback route returns a loud `501 Not Implemented` error instead of proxying upstream.
+9. **Local Amp mode is opt-in and strict**. `--amp-local` enables `src/amp/local.rs` for thread search, markdown export, internal RPCs, telemetry, labels, attachments, durable thread workers, and user info backed by local Amp data. It also serves a local `/news.rss` stub. Any other unsupported Amp fallback route returns a loud `501 Not Implemented` error instead of proxying upstream.
 10. **Amp local web search is pluggable**. `--search-provider` selects `jina`, `tavily`, `brave`, `searxng`, `model`, or `none`; `--search-model` applies when the provider is `model` and defaults to `gpt-5-mini`.
-11. **Droid local mode is opt-in and strict**. `--droid-local` enables `src/droid_local.rs` for `whoami`, managed settings, feature flags, local session index reads, session create/update writes, telemetry, and LLM bookkeeping endpoints. Any other unsupported non-LLM Droid route returns a loud `501 Not Implemented` error instead of proxying upstream.
+11. **Droid local mode is opt-in and strict**. `--droid-local` enables `src/droid/local.rs` for `whoami`, managed settings, feature flags, local session index reads, session create/update writes, telemetry, and LLM bookkeeping endpoints. Any other unsupported non-LLM Droid route returns a loud `501 Not Implemented` error instead of proxying upstream.
 
 ### Module Structure
 
@@ -196,10 +196,12 @@ src/
 ├── claude.rs        # Anthropic <-> OpenAI conversion, native Claude passthrough detection, and Anthropic-style errors
 ├── gemini.rs        # Gemini native API <-> OpenAI conversion
 ├── llm.rs           # Shared local OpenAI/Anthropic/Gemini route handlers
-├── amp.rs           # Amp provider routing and Amp-specific management proxy
-├── amp_local.rs     # Local Amp API handlers (--amp-local mode)
-├── droid.rs         # Droid LLM routing and Factory control-plane proxy
-├── droid_local.rs   # Local Droid control-plane handlers (--droid-local mode)
+├── amp/
+│   ├── mod.rs       # Amp provider routing and Amp-specific management proxy
+│   └── local.rs     # Local Amp API handlers (--amp-local mode)
+├── droid/
+│   ├── mod.rs       # Droid LLM routing and Factory control-plane proxy
+│   └── local.rs     # Local Droid control-plane handlers (--droid-local mode)
 ├── token_counter.rs # Local token estimation for Anthropic and Gemini routes
 ├── error.rs         # Shared internal error enum with OpenAI-style responses
 └── web_backend/     # Amp web backend components for local mode
@@ -239,7 +241,7 @@ Everything else remains generic passthrough.
 
 ### 2. Anthropic Routes Use Native Passthrough For Claude Models
 
-**Files**: `src/server.rs`, `src/claude.rs`, `src/amp.rs`
+**Files**: `src/server.rs`, `src/claude.rs`, `src/amp/mod.rs`
 
 When the request model is a native Claude model (name contains `claude`, `sonnet`, `haiku`, or `opus`), both `/v1/messages` and `/v1/messages/count_tokens` forward the Anthropic request directly to Copilot's corresponding `/v1/messages` endpoint without any OpenAI conversion. Initiator and vision flags are still inferred from the Anthropic message history.
 
@@ -261,7 +263,7 @@ Anthropic model aliases are mapped by substring:
 
 ### 3. Gemini Support Lives On Amp Provider Routes
 
-**Files**: `src/amp.rs`, `src/gemini.rs`
+**Files**: `src/amp/mod.rs`, `src/gemini.rs`
 
 Gemini native API requests are handled on Amp-style provider paths such as:
 
@@ -280,9 +282,9 @@ The flow is:
 
 ### 4. `/api/*` Routing Is Centralized
 
-**Files**: `src/api.rs`, `src/amp.rs`, `src/droid.rs`
+**Files**: `src/api.rs`, `src/amp/mod.rs`, `src/droid/mod.rs`
 
-The top-level router no longer lets `src/amp.rs` implicitly own every `/api/*` route. Instead:
+The top-level router no longer lets `src/amp/mod.rs` implicitly own every `/api/*` route. Instead:
 
 - `src/api.rs` dispatches `/api/provider/*` and remaining non-Droid paths to Amp
 - `src/api.rs` dispatches `/api/llm/*`, `/api/cli/*`, `/api/organization/*`, `/api/sessions/*`, and `/api/telemetry/*` to Droid
@@ -292,7 +294,7 @@ This split keeps module ownership aligned with product ownership.
 
 ### 5. Amp Management Routes Default To `ampcode.com`, But `--amp-local` Is Strict
 
-**File**: `src/amp.rs`
+**File**: `src/amp/mod.rs`
 
 By default, Amp management traffic is proxied to Amp upstream on these routes:
 
@@ -326,7 +328,7 @@ Any other unsupported Amp fallback route returns `501 Not Implemented` with an `
 
 ### 5a. Amp Local Search Backends
 
-**Files**: `src/main.rs`, `src/amp_local.rs`, `src/web_backend/*`
+**Files**: `src/main.rs`, `src/amp/local.rs`, `src/web_backend/*`
 
 `--amp-local` supports pluggable web search/page extraction backends for internal RPC methods such as `webSearch2` and `extractWebPageContent`:
 
@@ -339,13 +341,13 @@ Any other unsupported Amp fallback route returns `501 Not Implemented` with an `
 
 ### 6. Amp Anthropic Requests Have One Cost-Saving Rewrite
 
-**File**: `src/amp.rs`
+**File**: `src/amp/mod.rs`
 
 For Amp Anthropic provider traffic, native Claude models are normally forwarded via Copilot `/v1/messages`. However, lightweight non-streaming user-initiated `haiku` requests are excluded from native passthrough and instead rewritten to `gpt-5-mini` through the OpenAI conversion path. This is intentionally limited to the Amp provider path and is not applied to the direct `/v1/messages` route.
 
 ### 7. Droid Routing Uses Local LLM Adapters And Factory Control Plane
 
-**Files**: `src/droid.rs`, `src/droid_local.rs`, `src/llm.rs`
+**Files**: `src/droid/mod.rs`, `src/droid/local.rs`, `src/llm.rs`
 
 In all modes, these Droid LLM routes are handled locally:
 
@@ -397,7 +399,7 @@ The proxy also sets:
 
 ### 9. Sticky Inference Is Minimal And Route-Aware
 
-**Files**: `src/initiator.rs`, `src/server.rs`, `src/amp.rs`
+**Files**: `src/initiator.rs`, `src/server.rs`, `src/amp/mod.rs`
 
 - OpenAI chat completions inspect `messages`
 - OpenAI responses inspect `input`

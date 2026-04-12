@@ -1,5 +1,7 @@
 //! Droid CLI integration: local LLM routing plus optional local control plane.
 
+pub mod local;
+
 use crate::error::Error;
 use crate::llm;
 use crate::proxy::forward_response;
@@ -103,7 +105,7 @@ pub async fn handle_api_request(
     }
 
     if let Some(ref local_state) = state.droid_local {
-        return crate::droid_local::handle_local_api(local_state, &method, path, &body).await;
+        return local::handle_local_api(local_state, &method, path, &body).await;
     }
 
     let pq = uri

@@ -1,10 +1,10 @@
 //! Axum server: router, handlers, and application state.
 
 use crate::amp::AmpManagementProxy;
-use crate::amp_local::LocalAmpState;
+use crate::amp::local::LocalAmpState;
 use crate::auth::TokenManager;
 use crate::droid::DroidManagementProxy;
-use crate::droid_local::LocalDroidState;
+use crate::droid::local::LocalDroidState;
 use crate::error::Error;
 use crate::llm;
 use crate::proxy::ProxyClient;

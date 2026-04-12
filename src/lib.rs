@@ -1,13 +1,11 @@
 //! copilot-api-proxy - A reverse proxy for GitHub Copilot API
 
 pub mod amp;
-pub mod amp_local;
 pub mod api;
 pub mod auth;
 pub mod claude;
 pub mod config;
 pub mod droid;
-pub mod droid_local;
 pub mod error;
 pub mod gemini;
 pub mod initiator;
