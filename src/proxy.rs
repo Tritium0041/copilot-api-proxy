@@ -102,13 +102,6 @@ impl ProxyClient {
             "user"
         };
         crate::server::record_initiator(resolved_initiator);
-        tracing::debug!(
-            method = %method,
-            path = %path,
-            initiator = %resolved_initiator,
-            vision = is_vision,
-            "upstream"
-        );
 
         let mut req = self
             .client
