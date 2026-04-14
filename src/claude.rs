@@ -52,10 +52,13 @@ pub struct ClaudeRequestMetadata {
     pub is_vision: bool,
 }
 
-pub fn analyze_claude_request(body: &[u8]) -> Result<ClaudeRequestMetadata, Error> {
+pub fn analyze_claude_request(
+    body: &[u8],
+    headers: Option<&HeaderMap>,
+) -> Result<ClaudeRequestMetadata, Error> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|e| Error::InvalidRequest(format!("Invalid JSON body: {e}")))?;
-    analyze_claude_value(&value)
+    analyze_claude_value(&value, headers)
 }
 
 pub fn extract_anthropic_model(body: &[u8]) -> Option<String> {
@@ -92,11 +95,14 @@ pub fn validate_anthropic_headers(headers: &HeaderMap) -> Option<Response> {
     ))
 }
 
-pub fn convert_claude_request(body: Bytes) -> Result<ClaudeConvertedRequest, Error> {
+pub fn convert_claude_request(
+    body: Bytes,
+    headers: Option<&HeaderMap>,
+) -> Result<ClaudeConvertedRequest, Error> {
     let value: Value = serde_json::from_slice(&body)
         .map_err(|e| Error::InvalidRequest(format!("Invalid JSON body: {e}")))?;
 
-    let metadata = analyze_claude_value(&value)?;
+    let metadata = analyze_claude_value(&value, headers)?;
 
     let openai_body = convert_claude_value_to_openai(&value)?;
     let body_bytes = serde_json::to_vec(&openai_body)
@@ -111,7 +117,10 @@ pub fn convert_claude_request(body: Bytes) -> Result<ClaudeConvertedRequest, Err
     })
 }
 
-fn analyze_claude_value(value: &Value) -> Result<ClaudeRequestMetadata, Error> {
+fn analyze_claude_value(
+    value: &Value,
+    headers: Option<&HeaderMap>,
+) -> Result<ClaudeRequestMetadata, Error> {
     let model = value
         .get("model")
         .and_then(|v| v.as_str())
@@ -127,7 +136,7 @@ fn analyze_claude_value(value: &Value) -> Result<ClaudeRequestMetadata, Error> {
         .get("messages")
         .and_then(|v| v.as_array())
         .ok_or_else(|| Error::InvalidRequest("Missing required field: messages".to_string()))?;
-    let initiator = infer_initiator(messages).to_string();
+    let initiator = infer_initiator(messages, headers).to_string();
 
     let is_vision = messages.iter().any(|msg| {
         msg.get("content")
@@ -694,7 +703,7 @@ mod tests {
             ]
         });
 
-        let metadata = analyze_claude_request(body.to_string().as_bytes()).unwrap();
+        let metadata = analyze_claude_request(body.to_string().as_bytes(), None).unwrap();
         assert_eq!(metadata.initiator, "user");
         assert!(!metadata.is_vision);
     }
@@ -710,7 +719,7 @@ mod tests {
             ]
         });
 
-        let metadata = analyze_claude_request(body.to_string().as_bytes()).unwrap();
+        let metadata = analyze_claude_request(body.to_string().as_bytes(), None).unwrap();
         assert_eq!(metadata.initiator, "agent");
         assert!(!metadata.is_vision);
     }
@@ -730,7 +739,7 @@ mod tests {
             ]
         });
 
-        let metadata = analyze_claude_request(body.to_string().as_bytes()).unwrap();
+        let metadata = analyze_claude_request(body.to_string().as_bytes(), None).unwrap();
         assert_eq!(metadata.initiator, "user");
         assert!(metadata.is_vision);
     }

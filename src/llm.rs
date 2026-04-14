@@ -17,13 +17,18 @@ use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 use serde_json::Value;
 
-fn analyze_openai_request(path: &str, method: &Method, body: &[u8]) -> Option<RequestAnalysis> {
+fn analyze_openai_request(
+    path: &str,
+    method: &Method,
+    body: &[u8],
+    headers: &HeaderMap,
+) -> Option<RequestAnalysis> {
     if *method != Method::POST {
         return None;
     }
     match path {
-        "chat/completions" => Some(analyze_openai_chat_completions(body)),
-        "responses" => Some(analyze_openai_responses(body)),
+        "chat/completions" => Some(analyze_openai_chat_completions(body, Some(headers))),
+        "responses" => Some(analyze_openai_responses(body, Some(headers))),
         _ => None,
     }
 }
@@ -38,7 +43,7 @@ pub async fn handle_openai_passthrough(
 ) -> Result<Response, Error> {
     let content_type = headers.get("content-type").and_then(|v| v.to_str().ok());
     let query = query.map(|q| format!("?{}", q)).unwrap_or_default();
-    let analysis = analyze_openai_request(api_path, &method, &body);
+    let analysis = analyze_openai_request(api_path, &method, &body, headers);
 
     let resp = state
         .proxy
@@ -106,7 +111,7 @@ pub async fn handle_anthropic_compat(
                 return Ok(resp);
             }
 
-            let metadata = match analyze_claude_request(&body) {
+            let metadata = match analyze_claude_request(&body, Some(headers)) {
                 Ok(metadata) => metadata,
                 Err(err) => return Ok(error_from_proxy(err)),
             };
@@ -129,7 +134,7 @@ pub async fn handle_anthropic_compat(
                 return forward_response(resp).await;
             }
 
-            let converted = match convert_claude_request(body) {
+            let converted = match convert_claude_request(body, Some(headers)) {
                 Ok(converted) => converted,
                 Err(err) => return Ok(error_from_proxy(err)),
             };

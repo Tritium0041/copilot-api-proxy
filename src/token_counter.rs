@@ -46,7 +46,7 @@ async fn count_tokens_internal(body: &[u8]) -> Result<u64, Error> {
         .unwrap_or("");
 
     // Convert to OpenAI format (reuse existing logic)
-    let converted = convert_claude_request(Bytes::copy_from_slice(body))?;
+    let converted = convert_claude_request(Bytes::copy_from_slice(body), None)?;
     let openai_value: Value = serde_json::from_slice(&converted.body)
         .map_err(|e| Error::InvalidRequest(format!("Failed to parse converted request: {e}")))?;
 

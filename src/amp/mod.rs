@@ -444,7 +444,7 @@ async fn handle_anthropic(
     body: Bytes,
 ) -> Result<Response, Error> {
     if api_path == "messages" && method == Method::POST {
-        let metadata = match analyze_claude_request(&body) {
+        let metadata = match analyze_claude_request(&body, Some(&headers)) {
             Ok(m) => m,
             Err(e) => return Ok(error_from_proxy(e)),
         };
@@ -453,7 +453,7 @@ async fn handle_anthropic(
             && metadata.initiator == "user"
             && metadata.model.to_lowercase().contains("haiku");
         if use_haiku_rewrite {
-            let mut converted = match convert_claude_request(body) {
+            let mut converted = match convert_claude_request(body, Some(&headers)) {
                 Ok(c) => c,
                 Err(e) => return Ok(error_from_proxy(e)),
             };
