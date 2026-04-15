@@ -5,8 +5,9 @@
 //! consume Copilot premium requests.
 //!
 //! Additionally, requests from automated agent systems (e.g. Factory/Droid task
-//! workers) are detected via message content patterns and marked as agent-initiated
-//! even on their first turn (which lacks prior assistant messages).
+//! workers, Amp subagents) are detected via message content patterns and marked
+//! as agent-initiated even on their first turn (which lacks prior assistant
+//! messages).
 
 use axum::http::HeaderMap;
 use serde_json::Value;
@@ -20,14 +21,19 @@ pub struct RequestAnalysis {
 
 /// Infer the initiator from Claude/Anthropic format message history.
 /// Returns "agent" if any assistant/tool messages exist, or if the message
-/// content indicates an automated task worker.  Returns "user" otherwise.
+/// content indicates an automated task worker or Amp subagent.
+/// Returns "user" otherwise.
 pub fn infer_initiator_claude(messages: &[Value], headers: Option<&HeaderMap>) -> &'static str {
     let initiator = infer_initiator_from_messages(messages, &["assistant", "tool"]);
-    if initiator == "user"
-        && headers.map_or(false, is_factory_client)
-        && messages_contain_task_marker(messages)
-    {
-        return "agent";
+    if initiator == "user" {
+        if let Some(hdrs) = headers {
+            if is_factory_client(hdrs) && messages_contain_task_marker(messages) {
+                return "agent";
+            }
+            if is_amp_client(hdrs) && messages_contain_amp_subagent_marker(messages) {
+                return "agent";
+            }
+        }
     }
     initiator
 }
@@ -47,11 +53,14 @@ pub fn analyze_openai_chat_completions(body: &[u8], headers: Option<&HeaderMap>)
         };
     };
     let mut initiator = infer_initiator_from_messages(messages, &["assistant", "tool"]);
-    if initiator == "user"
-        && headers.map_or(false, is_factory_client)
-        && messages_contain_task_marker(messages)
-    {
-        initiator = "agent";
+    if initiator == "user" {
+        if let Some(hdrs) = headers {
+            if is_factory_client(hdrs) && messages_contain_task_marker(messages) {
+                initiator = "agent";
+            } else if is_amp_client(hdrs) && messages_contain_amp_subagent_marker(messages) {
+                initiator = "agent";
+            }
+        }
     }
     let is_vision = messages.iter().any(|msg| {
         msg.get("content")
@@ -96,11 +105,14 @@ pub fn analyze_openai_responses(body: &[u8], headers: Option<&HeaderMap>) -> Req
         };
     };
     let mut initiator = infer_initiator_from_messages(items, &["assistant", "tool"]);
-    if initiator == "user"
-        && headers.map_or(false, is_factory_client)
-        && messages_contain_task_marker(items)
-    {
-        initiator = "agent";
+    if initiator == "user" {
+        if let Some(hdrs) = headers {
+            if is_factory_client(hdrs) && messages_contain_task_marker(items) {
+                initiator = "agent";
+            } else if is_amp_client(hdrs) && messages_contain_amp_subagent_marker(items) {
+                initiator = "agent";
+            }
+        }
     }
     let is_vision = items.iter().any(|item| {
         item.get("content")
@@ -140,6 +152,18 @@ const AGENT_TASK_PATTERNS: &[&str] = &[
     "# Task Tool Invocation",
 ];
 
+/// System prompt patterns that identify Amp subagent sessions (Oracle, Task,
+/// code search, diff explainer, Librarian, Walkthrough Planner, REPL, review,
+/// etc.).  These are matched against system/developer/user messages.
+const AMP_SUBAGENT_PATTERNS: &[&str] = &[
+    "You are the Oracle",
+    "You are a fast, parallel code search agent",
+    "You are a specialized subagent",
+    "You are the Librarian",
+    "You are the Walkthrough Planner",
+    "You are a REPL operator",
+];
+
 /// Check whether any message in the request carries content that identifies it
 /// as originating from an automated task/worker agent.  This covers both OpenAI
 /// (system/user/developer role strings or content arrays) and Anthropic (user
@@ -169,6 +193,37 @@ fn messages_contain_task_marker(messages: &[Value]) -> bool {
 /// Factory / Droid CLI client (via the `x-factory-client` header).
 pub fn is_factory_client(headers: &HeaderMap) -> bool {
     headers.contains_key("x-factory-client")
+}
+
+/// Returns `true` when the incoming request headers identify the caller as an
+/// Amp CLI/IDE client (via the `x-amp-thread-id` header).
+pub fn is_amp_client(headers: &HeaderMap) -> bool {
+    headers.contains_key("x-amp-thread-id")
+}
+
+/// Check whether any message in the request carries system prompt content that
+/// identifies it as originating from an Amp subagent (Oracle, Task, code
+/// search, etc.).  Checks both OpenAI (system/developer role) and Anthropic
+/// (user role content blocks) message shapes.
+fn messages_contain_amp_subagent_marker(messages: &[Value]) -> bool {
+    for msg in messages {
+        // Check both string and array content shapes.
+        if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+            if AMP_SUBAGENT_PATTERNS.iter().any(|p| text.contains(p)) {
+                return true;
+            }
+        }
+        if let Some(parts) = msg.get("content").and_then(|c| c.as_array()) {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                    if AMP_SUBAGENT_PATTERNS.iter().any(|p| text.contains(p)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -497,5 +552,169 @@ mod tests {
             "content": "# Task Tool Invocation\n\nSubagent type: worker"
         })];
         assert!(messages_contain_task_marker(&messages));
+    }
+
+    // --- Amp subagent detection tests ---
+
+    fn amp_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-amp-thread-id", "T-019d90e9-test".parse().unwrap());
+        headers.insert("x-amp-feature", "amp.chat".parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn test_amp_oracle_claude() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "You are the Oracle - an expert AI advisor with advanced reasoning capabilities.\nYou are a subagent inside an AI coding system."}
+            ]
+        })];
+        let headers = amp_headers();
+        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
+    }
+
+    #[test]
+    fn test_amp_code_search_claude() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": "You are a fast, parallel code search agent.\nSearch for usages of function foo."
+        })];
+        let headers = amp_headers();
+        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
+    }
+
+    #[test]
+    fn test_amp_diff_explainer_claude() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": "You are a specialized subagent that explains diffs.\nExplain the following diff:"
+        })];
+        let headers = amp_headers();
+        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
+    }
+
+    #[test]
+    fn test_amp_librarian_claude() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "You are the Librarian, a specialized codebase understanding agent."}
+            ]
+        })];
+        let headers = amp_headers();
+        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
+    }
+
+    #[test]
+    fn test_amp_walkthrough_planner_claude() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": "You are the Walkthrough Planner - an expert at exploring codebases."
+        })];
+        let headers = amp_headers();
+        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
+    }
+
+    #[test]
+    fn test_amp_repl_operator_claude() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": "You are a REPL operator. Your text responses are sent DIRECTLY to a shell."
+        })];
+        let headers = amp_headers();
+        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "agent");
+    }
+
+    #[test]
+    fn test_amp_main_session_stays_user() {
+        // Main Amp session — no subagent markers — should stay "user"
+        let messages = vec![json!({
+            "role": "user",
+            "content": "You are a pragmatic, effective software engineer."
+        })];
+        let headers = amp_headers();
+        assert_eq!(infer_initiator_claude(&messages, Some(&headers)), "user");
+    }
+
+    #[test]
+    fn test_no_amp_header_ignores_markers() {
+        // Subagent marker present but NO x-amp-thread-id header — should stay "user"
+        let messages = vec![json!({
+            "role": "user",
+            "content": "You are the Oracle - an expert AI advisor."
+        })];
+        assert_eq!(infer_initiator_claude(&messages, None), "user");
+    }
+
+    #[test]
+    fn test_amp_oracle_openai_chat() {
+        let body = json!({
+            "messages": [{
+                "role": "system",
+                "content": "You are the Oracle - an expert AI advisor with advanced reasoning capabilities."
+            }, {
+                "role": "user",
+                "content": "Check this code for correctness"
+            }]
+        });
+        let headers = amp_headers();
+        let result = analyze_openai_chat_completions(body.to_string().as_bytes(), Some(&headers));
+        assert_eq!(result.initiator, "agent");
+    }
+
+    #[test]
+    fn test_amp_code_search_openai_responses() {
+        let body = json!({
+            "input": [{
+                "role": "system",
+                "content": "You are a fast, parallel code search agent."
+            }, {
+                "role": "user",
+                "content": "Find all usages of struct Foo"
+            }]
+        });
+        let headers = amp_headers();
+        let result = analyze_openai_responses(body.to_string().as_bytes(), Some(&headers));
+        assert_eq!(result.initiator, "agent");
+    }
+
+    #[test]
+    fn test_amp_subagent_marker_detection() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": "You are the Oracle - an expert AI advisor."
+        })];
+        assert!(messages_contain_amp_subagent_marker(&messages));
+    }
+
+    #[test]
+    fn test_amp_subagent_marker_array_content() {
+        let messages = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "You are a specialized subagent that explains diffs."}
+            ]
+        })];
+        assert!(messages_contain_amp_subagent_marker(&messages));
+    }
+
+    #[test]
+    fn test_no_amp_subagent_marker() {
+        let messages = vec![json!({"role": "user", "content": "Hello world"})];
+        assert!(!messages_contain_amp_subagent_marker(&messages));
+    }
+
+    #[test]
+    fn test_is_amp_client() {
+        let headers = amp_headers();
+        assert!(is_amp_client(&headers));
+    }
+
+    #[test]
+    fn test_is_not_amp_client() {
+        let headers = HeaderMap::new();
+        assert!(!is_amp_client(&headers));
     }
 }

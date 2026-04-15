@@ -412,6 +412,22 @@ Rules:
 - Otherwise it is `user`
 - Invalid JSON falls back to `user`
 
+Additionally, first-turn requests from automated agent systems are detected
+via a two-condition check (identifying header + message content pattern) and
+overridden to `agent` even when no prior assistant messages exist:
+
+- **Factory/Droid**: `x-factory-client` header present AND message content
+  contains task worker/subagent markers (`"You are a worker assigned to
+  implement feature"`, `"## Worker Session"`, `"# Task Tool Invocation"`).
+  Orchestrator sessions (no markers) stay `"user"`.
+
+- **Amp subagents**: `x-amp-thread-id` header present AND system prompt
+  contains subagent identity markers (`"You are the Oracle"`,
+  `"You are a fast, parallel code search agent"`,
+  `"You are a specialized subagent"`, `"You are the Librarian"`,
+  `"You are the Walkthrough Planner"`, `"You are a REPL operator"`).
+  The main Amp session (no subagent markers) stays `"user"`.
+
 ### 10. Token Lifecycle
 
 **Files**: `src/auth.rs`, `src/config.rs`
