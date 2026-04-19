@@ -9,7 +9,9 @@
 
 pub mod local;
 
-use crate::claude::{analyze_claude_request, convert_claude_request, error_from_proxy};
+use crate::claude::{
+    analyze_claude_request, convert_claude_request, convert_openai_response, error_from_proxy,
+};
 use crate::error::Error;
 use crate::gemini::{handle_gemini_count_tokens, parse_gemini_action};
 use crate::llm;
@@ -458,15 +460,26 @@ async fn handle_anthropic(
                 Err(e) => return Ok(error_from_proxy(e)),
             };
             converted.body = rewrite_model_in_body(&converted.body, "gpt-5-mini");
-            return llm::handle_openai_passthrough(
-                &state,
-                method,
-                "chat/completions",
-                uri.query(),
-                &headers,
-                converted.body,
-            )
-            .await;
+            let query = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+            let resp = match state
+                .proxy
+                .forward(
+                    &format!("/chat/completions{}", query),
+                    method,
+                    converted.body,
+                    Some("application/json"),
+                    Some(&converted.initiator),
+                    converted.is_vision,
+                )
+                .await
+            {
+                Ok(resp) => resp,
+                Err(err) => return Ok(error_from_proxy(err)),
+            };
+            return match convert_openai_response(resp, converted.model, converted.stream).await {
+                Ok(response) => Ok(response),
+                Err(err) => Ok(error_from_proxy(err)),
+            };
         }
     }
 
