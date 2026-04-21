@@ -60,6 +60,43 @@ pub async fn handle_openai_passthrough(
     forward_response(resp).await
 }
 
+/// Model aliases: (substring_to_replace, replacement).
+/// Applied in order; first match wins.
+/// Add new entries here when Copilot removes or renames a model.
+const ANTHROPIC_MODEL_ALIASES: &[(&str, &str)] = &[
+    ("claude-opus-4.6", "claude-opus-4.7"),
+];
+
+/// Remap deprecated Anthropic model aliases in a request body.
+fn remap_anthropic_model(body: Bytes) -> Bytes {
+    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) {
+        if let Some(model) = value.get("model").and_then(|v| v.as_str()) {
+            let mut remapped = model.to_string();
+            for (from, to) in ANTHROPIC_MODEL_ALIASES {
+                if remapped.contains(from) {
+                    remapped = remapped.replace(from, to);
+                    break;
+                }
+            }
+            if remapped != model {
+                tracing::debug!(
+                    target: "llm",
+                    old_model = model,
+                    new_model = %remapped,
+                    "remapping deprecated Anthropic model"
+                );
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert("model".to_string(), serde_json::Value::String(remapped));
+                    if let Ok(bytes) = serde_json::to_vec(&value) {
+                        return Bytes::from(bytes);
+                    }
+                }
+            }
+        }
+    }
+    body
+}
+
 pub async fn handle_anthropic_compat(
     state: &AppState,
     method: Method,
@@ -69,6 +106,7 @@ pub async fn handle_anthropic_compat(
     body: Bytes,
     validate_client_api_key: bool,
 ) -> Result<Response, Error> {
+    let body = remap_anthropic_model(body);
     let query = query.map(|q| format!("?{}", q)).unwrap_or_default();
     let content_type = headers.get("content-type").and_then(|v| v.to_str().ok());
 
