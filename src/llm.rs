@@ -65,33 +65,91 @@ pub async fn handle_openai_passthrough(
 /// Add new entries here when Copilot removes or renames a model.
 const ANTHROPIC_MODEL_ALIASES: &[(&str, &str)] = &[
     ("claude-opus-4.6", "claude-opus-4.7"),
+    ("claude-opus-4-6", "claude-opus-4-7"),
 ];
 
-/// Remap deprecated Anthropic model aliases in a request body.
+/// Convert `budget_tokens` to a Copilot `output_config.effort` string.
+fn budget_tokens_to_effort(budget_tokens: u64) -> &'static str {
+    if budget_tokens < 4_000 {
+        "low"
+    } else if budget_tokens < 16_000 {
+        "medium"
+    } else if budget_tokens < 28_000 {
+        "high"
+    } else {
+        "xhigh"
+    }
+}
+
+/// Rewrite an Anthropic request body:
+/// 1. Remap deprecated model aliases.
+/// 2. Convert `thinking.type: "enabled"` + `budget_tokens` to
+///    `thinking.type: "adaptive"` + `output_config.effort`, which is what
+///    Copilot's adaptive-thinking models (e.g. claude-opus-4.7) require.
 fn remap_anthropic_model(body: Bytes) -> Bytes {
-    if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) {
-        if let Some(model) = value.get("model").and_then(|v| v.as_str()) {
-            let mut remapped = model.to_string();
-            for (from, to) in ANTHROPIC_MODEL_ALIASES {
-                if remapped.contains(from) {
-                    remapped = remapped.replace(from, to);
-                    break;
-                }
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return body;
+    };
+    let obj = match value.as_object_mut() {
+        Some(o) => o,
+        None => return body,
+    };
+
+    // 1. Model alias remapping.
+    let mut model_changed = false;
+    if let Some(model) = obj.get("model").and_then(|v| v.as_str()) {
+        let mut remapped = model.to_string();
+        for (from, to) in ANTHROPIC_MODEL_ALIASES {
+            if remapped.contains(from) {
+                remapped = remapped.replace(from, to);
+                break;
             }
-            if remapped != model {
-                tracing::debug!(
-                    target: "llm",
-                    old_model = model,
-                    new_model = %remapped,
-                    "remapping deprecated Anthropic model"
-                );
-                if let Some(obj) = value.as_object_mut() {
-                    obj.insert("model".to_string(), serde_json::Value::String(remapped));
-                    if let Ok(bytes) = serde_json::to_vec(&value) {
-                        return Bytes::from(bytes);
+        }
+        if remapped != model {
+            tracing::debug!(
+                target: "llm",
+                old_model = model,
+                new_model = %remapped,
+                "remapping deprecated Anthropic model"
+            );
+            obj.insert("model".to_string(), serde_json::Value::String(remapped));
+            model_changed = true;
+        }
+    }
+
+    // 2. Thinking type conversion: "enabled" -> "adaptive" + output_config.effort.
+    let mut thinking_changed = false;
+    if let Some(thinking) = obj.get_mut("thinking").and_then(|v| v.as_object_mut()) {
+        if thinking.get("type").and_then(|v| v.as_str()) == Some("enabled") {
+            let budget = thinking
+                .get("budget_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10_000);
+            thinking.insert("type".to_string(), serde_json::Value::String("adaptive".to_string()));
+            thinking.remove("budget_tokens");
+            let effort = budget_tokens_to_effort(budget);
+            tracing::debug!(
+                target: "llm",
+                budget_tokens = budget,
+                effort,
+                "converting thinking.type enabled -> adaptive"
+            );
+            thinking_changed = true;
+            // Insert output_config.effort (merge with existing if present).
+            let effort_val = serde_json::json!({ "effort": effort });
+            obj.entry("output_config".to_string())
+                .and_modify(|v| {
+                    if let Some(cfg) = v.as_object_mut() {
+                        cfg.insert("effort".to_string(), serde_json::Value::String(effort.to_string()));
                     }
-                }
-            }
+                })
+                .or_insert(effort_val);
+        }
+    }
+
+    if model_changed || thinking_changed {
+        if let Ok(bytes) = serde_json::to_vec(&value) {
+            return Bytes::from(bytes);
         }
     }
     body

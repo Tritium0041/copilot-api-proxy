@@ -38,6 +38,7 @@ impl LocalDroidState {
                     },
                     "models": {
                         "claude-opus-4-6": ["anthropic"],
+                        "claude-opus-4-7": ["anthropic"],
                         "claude-sonnet-4-6": ["anthropic"],
                         "claude-haiku-4-5-20251001": ["anthropic"],
                         "gpt-5.4": ["openai"],
