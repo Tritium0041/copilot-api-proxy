@@ -17,11 +17,11 @@
 //! The Amp CLI gzip-compresses request bodies larger than ~25 KB.
 //! Thread write handlers transparently decompress when `Content-Encoding: gzip` is set.
 
-use crate::proxy::ProxyClient;
+use crate::proxy::{ProxyClient, forward_response};
 use crate::web_backend::{self, SearchProvider, WebBackend};
 use axum::Json;
 use axum::body::Bytes;
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -101,8 +101,10 @@ struct ThreadSearchEntry {
     #[serde(rename = "creatorUserID")]
     creator_user_id: Option<String>,
     created: u64,
+    /// The newer Amp search API expects a date string here. Other thread
+    /// summaries, such as `listThreads`, still use numeric millisecond stamps.
     #[serde(rename = "updatedAt")]
-    updated_at: u64,
+    updated_at: String,
     #[serde(rename = "messageCount")]
     message_count: u64,
     #[serde(rename = "matchedSearchText")]
@@ -125,6 +127,7 @@ struct IndexedThread {
     env: Option<serde_json::Value>,
     relationships: Vec<serde_json::Value>,
     uses_dtw: bool,
+    uses_thread_actors: bool,
     archived: bool,
     /// Concatenated searchable text (title + first user messages)
     search_text: String,
@@ -135,6 +138,8 @@ pub struct LocalAmpState {
     index: RwLock<Vec<IndexedThread>>,
     /// Timestamp of last index rebuild
     last_indexed: RwLock<std::time::Instant>,
+    /// Shared HTTP client for local-mode helper calls that do not go through Copilot.
+    http: reqwest::Client,
     /// Pluggable web search / page-extract backend
     web: Box<dyn WebBackend>,
 }
@@ -150,7 +155,8 @@ impl LocalAmpState {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client for local amp");
-        let web = web_backend::create_backend(&search_provider, http, Some(proxy), search_model);
+        let web =
+            web_backend::create_backend(&search_provider, http.clone(), Some(proxy), search_model);
         tracing::info!("Search provider: {}", search_provider);
         Self {
             threads_dir,
@@ -158,6 +164,7 @@ impl LocalAmpState {
             last_indexed: RwLock::new(
                 std::time::Instant::now() - std::time::Duration::from_secs(3600),
             ),
+            http,
             web,
         }
     }
@@ -255,6 +262,12 @@ async fn read_thread_index_entry(path: &Path) -> Option<IndexedThread> {
         .and_then(|m| m.get("usesDtw"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let uses_thread_actors = thread
+        .meta
+        .as_ref()
+        .and_then(|m| m.get("usesThreadActors"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     Some(IndexedThread {
         id: thread.id.clone(),
@@ -267,6 +280,7 @@ async fn read_thread_index_entry(path: &Path) -> Option<IndexedThread> {
         env: thread.env.clone(),
         relationships: thread.relationships.clone().unwrap_or_default(),
         uses_dtw,
+        uses_thread_actors,
         archived: thread.archived.unwrap_or(false),
         search_text: search_parts.join(" ").to_lowercase(),
     })
@@ -345,6 +359,17 @@ pub async fn handle_local_api(
         return handle_thread_markdown(state, id, query).await;
     }
 
+    // Direct internal endpoints used by newer Amp clients.
+    if path == "internal/github-auth-status" {
+        return handle_direct_github_auth_status().await;
+    }
+    if path == "internal/bitbucket-instance-url" {
+        return Ok(Json(serde_json::json!({"instanceUrl": null})).into_response());
+    }
+    if let Some(github_path) = path.strip_prefix("internal/github-proxy/") {
+        return handle_github_proxy(state, method, github_path, query, headers, body).await;
+    }
+
     // /api/internal?method
     if path.starts_with("internal") {
         return handle_internal_rpc(state, query, headers, body).await;
@@ -367,7 +392,7 @@ pub async fn handle_local_api(
 
     // /api/attachments
     if path == "attachments" {
-        return Ok((StatusCode::OK, Json(serde_json::json!({"attachments": []}))).into_response());
+        return handle_attachment_upload().await;
     }
 
     // Fallback
@@ -462,7 +487,7 @@ async fn handle_thread_search(
                 title: t.title.clone(),
                 creator_user_id: Some("local-user".into()),
                 created: t.created,
-                updated_at: t.updated_at,
+                updated_at: chrono_format_millis(t.updated_at),
                 message_count: t.message_count,
                 matched_search_text: matched,
             }
@@ -685,10 +710,12 @@ fn thread_to_markdown(thread: &ThreadFile, truncate_tool_results: bool) -> Strin
 fn chrono_format_millis(millis: u64) -> String {
     // Simple ISO-ish format without external dependency
     let secs = millis / 1000;
+    let millis_remainder = millis % 1000;
     let days_since_epoch = secs / 86400;
     let time_of_day = secs % 86400;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
 
     // Approximate date calculation
     let mut year = 1970i64;
@@ -734,8 +761,8 @@ fn chrono_format_millis(millis: u64) -> String {
     let day = remaining_days + 1;
 
     format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}Z",
-        year, month, day, hours, minutes
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        year, month, day, hours, minutes, seconds, millis_remainder
     )
 }
 
@@ -792,7 +819,7 @@ async fn handle_internal_rpc(
         }
         "github-auth-status" => Ok(Json(serde_json::json!({
             "ok": true,
-            "result": { "authenticated": true }
+            "result": { "authenticated": github_token().is_some() }
         }))
         .into_response()),
         "userDisplayBalanceInfo" => Ok(Json(serde_json::json!({
@@ -801,6 +828,18 @@ async fn handle_internal_rpc(
         }))
         .into_response()),
         "markAsReadMysteriousMessage" => ok_null(),
+        "loadPlugins" => Ok(Json(serde_json::json!({
+            "ok": true,
+            "result": []
+        }))
+        .into_response()),
+        "sendReport" => Ok(Json(serde_json::json!({
+            "ok": true,
+            "result": {
+                "reportID": format!("local-report-{}", uuid::Uuid::new_v4())
+            }
+        }))
+        .into_response()),
 
         // ── Thread CRUD ─────────────────────────────────────────────
         "getThread" => handle_get_thread(state, body).await,
@@ -808,15 +847,8 @@ async fn handle_internal_rpc(
         "uploadThread" => handle_upload_thread(state, headers, body).await,
         "setThreadMeta" => handle_set_thread_meta(state, headers, body).await,
         "deleteThread" => handle_delete_thread(state, headers, body).await,
-        "getThreadLinkInfo" => {
-            // Returns info for rendering a thread link preview.
-            // No remote store → empty result.
-            Ok(Json(serde_json::json!({
-                "ok": true,
-                "result": null
-            }))
-            .into_response())
-        }
+        "archiveThread" => handle_archive_thread(state, headers, body).await,
+        "getThreadLinkInfo" => handle_get_thread_link_info(body).await,
         "createRemoteExecutorThread" => ok_null(),
 
         // ── Thread sharing & labels ─────────────────────────────────
@@ -910,6 +942,96 @@ fn ok_null() -> Result<Response, crate::Error> {
     Ok(Json(serde_json::json!({"ok": true, "result": null})).into_response())
 }
 
+fn github_token() -> Option<String> {
+    crate::config::load_github_token()
+        .ok()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
+}
+
+async fn handle_direct_github_auth_status() -> Result<Response, crate::Error> {
+    Ok(Json(serde_json::json!({
+        "authenticated": github_token().is_some()
+    }))
+    .into_response())
+}
+
+async fn handle_github_proxy(
+    state: &Arc<LocalAmpState>,
+    method: &Method,
+    github_path: &str,
+    query: Option<&str>,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<Response, crate::Error> {
+    let Some(token) = github_token() else {
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "message": "GitHub token not configured"
+            })),
+        )
+            .into_response());
+    };
+
+    let github_path = github_path.trim_start_matches('/');
+    if github_path.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "message": "missing GitHub API path"
+            })),
+        )
+            .into_response());
+    }
+
+    let mut url = format!("https://api.github.com/{github_path}");
+    if let Some(query) = query
+        && !query.is_empty()
+    {
+        url.push('?');
+        url.push_str(query);
+    }
+
+    let mut req = state
+        .http
+        .request(method.clone(), url)
+        .header(header::USER_AGENT, "copilot-api-proxy")
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .header("x-github-api-version", "2022-11-28")
+        .header(header::AUTHORIZATION, format!("token {token}"));
+
+    for name in [
+        header::ACCEPT,
+        header::CONTENT_TYPE,
+        header::IF_NONE_MATCH,
+        header::IF_MODIFIED_SINCE,
+    ] {
+        if let Some(value) = headers.get(&name) {
+            req = req.header(name, value);
+        }
+    }
+
+    if !body.is_empty() {
+        req = req.body(body.clone());
+    }
+
+    let resp = req.send().await?;
+    forward_response(resp).await
+}
+
+async fn handle_attachment_upload() -> Result<Response, crate::Error> {
+    // Newer Amp clients only need a localhost URL to keep the original inline
+    // base64 image in the outgoing model request.
+    Ok(Json(attachment_upload_response()).into_response())
+}
+
+fn attachment_upload_response() -> serde_json::Value {
+    serde_json::json!({
+        "url": "http://localhost/amp-local-attachment"
+    })
+}
+
 /// Handle `getThread` — return thread JSON from local file.
 async fn handle_get_thread(
     state: &Arc<LocalAmpState>,
@@ -944,6 +1066,18 @@ async fn handle_get_thread(
     }
 }
 
+async fn handle_get_thread_link_info(body: &Bytes) -> Result<Response, crate::Error> {
+    let thread_id = extract_thread_id(body);
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "result": {
+            "threadID": thread_id,
+            "creatorUserID": "local-user"
+        }
+    }))
+    .into_response())
+}
+
 /// Handle `listThreads` — return summaries of all local threads.
 async fn handle_list_threads(
     state: &Arc<LocalAmpState>,
@@ -966,6 +1100,7 @@ async fn handle_list_threads(
                 "agentMode": t.agent_mode,
                 "archived": t.archived,
                 "usesDtw": t.uses_dtw,
+                "usesThreadActors": t.uses_thread_actors,
                 "env": t.env,
                 "relationships": t.relationships,
                 "summaryStats": {
@@ -1177,6 +1312,79 @@ async fn handle_set_thread_meta(
     }
 
     tracing::debug!(thread_id = %thread_id, "Updated thread meta on disk");
+    *state.last_indexed.write().await =
+        std::time::Instant::now() - std::time::Duration::from_secs(3600);
+
+    ok_null()
+}
+
+// ---------------------------------------------------------------------------
+// Handler: archiveThread — update local archived state
+// ---------------------------------------------------------------------------
+
+async fn handle_archive_thread(
+    state: &Arc<LocalAmpState>,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<Response, crate::Error> {
+    let parsed = match parse_rpc_body(headers, body) {
+        Ok(v) => v,
+        Err(r) => return Ok(r),
+    };
+
+    let params = parsed.get("params").unwrap_or(&parsed);
+    let thread_id = params.get("thread").and_then(|v| v.as_str()).unwrap_or("");
+    if thread_id.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": {"code": "invalid-request", "message": "missing thread id"}})),
+        )
+            .into_response());
+    }
+    let archived = params
+        .get("archived")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let path = state.threads_dir.join(format!("{}.json", thread_id));
+    let data = match tokio::fs::read(&path).await {
+        Ok(d) => d,
+        Err(_) => {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": { "code": "thread-not-found", "message": format!("Thread {} not found", thread_id) }
+            }))
+            .into_response());
+        }
+    };
+
+    let mut thread: serde_json::Value = match serde_json::from_slice(&data) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(thread_id = %thread_id, error = %e, "Failed to parse thread for archiveThread");
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"ok": false, "error": {"code": "parse-error", "message": format!("failed to parse thread: {}", e)}})),
+            )
+                .into_response());
+        }
+    };
+
+    if let Some(obj) = thread.as_object_mut() {
+        obj.insert("archived".to_string(), serde_json::Value::Bool(archived));
+    }
+
+    let updated = serde_json::to_vec(&thread).unwrap_or_default();
+    if let Err(e) = tokio::fs::write(&path, &updated).await {
+        tracing::error!(thread_id = %thread_id, error = %e, "Failed to write thread after archiveThread");
+        return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"ok": false, "error": {"code": "io-error", "message": format!("failed to write thread: {}", e)}})),
+        )
+            .into_response());
+    }
+
+    tracing::debug!(thread_id = %thread_id, archived = archived, "Updated thread archived state");
     *state.last_indexed.write().await =
         std::time::Instant::now() - std::time::Duration::from_secs(3600);
 
@@ -1544,4 +1752,36 @@ async fn handle_user_info() -> Result<Response, crate::Error> {
         "avatarURL": null
     }))
     .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thread_search_updated_at_serializes_as_date_string() {
+        let entry = ThreadSearchEntry {
+            id: "thread-1".to_string(),
+            title: Some("Example".to_string()),
+            creator_user_id: Some("local-user".to_string()),
+            created: 123,
+            updated_at: chrono_format_millis(123),
+            message_count: 1,
+            matched_search_text: None,
+        };
+        let value = serde_json::to_value(entry).unwrap();
+
+        assert_eq!(value["created"], 123);
+        assert_eq!(value["updatedAt"], "1970-01-01T00:00:00.123Z");
+    }
+
+    #[test]
+    fn attachment_upload_returns_localhost_url_for_inline_fallback() {
+        assert_eq!(
+            attachment_upload_response(),
+            serde_json::json!({
+                "url": "http://localhost/amp-local-attachment"
+            })
+        );
+    }
 }

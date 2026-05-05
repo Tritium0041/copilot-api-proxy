@@ -12,10 +12,10 @@ use crate::web_backend::SearchProvider;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, Path, State};
+use axum::http::Request;
 use axum::http::{HeaderMap, Method};
 use axum::response::Response;
 use axum::routing::{any, get};
-use axum::http::Request;
 use std::sync::Arc;
 use tower_http::trace::MakeSpan;
 
@@ -95,10 +95,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/v1/{*path}", any(proxy_handler))
         .merge(crate::api::routes())
         .merge(crate::amp::root_routes())
-        .layer(
-            tower_http::trace::TraceLayer::new_for_http()
-                .make_span_with(CopilotMakeSpan),
-        )
+        .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(CopilotMakeSpan))
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             10 * 1024 * 1024,
         ))

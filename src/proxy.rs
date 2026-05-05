@@ -7,7 +7,10 @@ use axum::response::Response;
 use futures::TryStreamExt;
 use reqwest::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 const HOP_BY_HOP: &[&str] = &[
     "transfer-encoding",
@@ -20,12 +23,21 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
+const MODELS_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const MODELS_UNKNOWN_REFRESH_TTL: Duration = Duration::from_secs(5 * 60);
+
+struct ModelsCache {
+    fetched_at: Instant,
+    reasoning_efforts_by_model: HashMap<String, Vec<String>>,
+}
+
 pub struct ProxyClient {
     client: Client,
     token_manager: Arc<TokenManager>,
     device_id: String,
     machine_id: String,
     session_id: String,
+    models_cache: RwLock<Option<ModelsCache>>,
 }
 
 impl ProxyClient {
@@ -42,6 +54,7 @@ impl ProxyClient {
             device_id,
             machine_id,
             session_id,
+            models_cache: RwLock::new(None),
         })
     }
 
@@ -53,6 +66,20 @@ impl ProxyClient {
         content_type: Option<&str>,
         initiator: Option<&str>,
         is_vision: bool,
+    ) -> Result<reqwest::Response, Error> {
+        self.forward_inner(path, method, body, content_type, initiator, is_vision, true)
+            .await
+    }
+
+    async fn forward_inner(
+        &self,
+        path: &str,
+        method: reqwest::Method,
+        body: Bytes,
+        content_type: Option<&str>,
+        initiator: Option<&str>,
+        is_vision: bool,
+        track_upstream: bool,
     ) -> Result<reqwest::Response, Error> {
         let token = self.token_manager.get_token().await?;
         let api_base = self.token_manager.get_api_base().await?;
@@ -67,6 +94,7 @@ impl ProxyClient {
                 &token,
                 initiator,
                 is_vision,
+                track_upstream,
             )
             .await?;
 
@@ -86,6 +114,7 @@ impl ProxyClient {
                         &new_token,
                         initiator,
                         is_vision,
+                        track_upstream,
                     )
                     .await;
             }
@@ -110,6 +139,84 @@ impl ProxyClient {
         Ok(resp)
     }
 
+    pub async fn supported_reasoning_efforts(
+        &self,
+        model: &str,
+    ) -> Result<Option<Vec<String>>, Error> {
+        let keys = model_lookup_keys(model);
+        if let Some(efforts) = self.cached_reasoning_efforts(&keys).await {
+            return Ok(efforts);
+        }
+
+        let reasoning_efforts_by_model = self.fetch_model_reasoning_efforts().await?;
+        let efforts = keys
+            .iter()
+            .find_map(|key| reasoning_efforts_by_model.get(key).cloned());
+        *self.models_cache.write().await = Some(ModelsCache {
+            fetched_at: Instant::now(),
+            reasoning_efforts_by_model,
+        });
+        Ok(efforts)
+    }
+
+    async fn cached_reasoning_efforts(&self, keys: &[String]) -> Option<Option<Vec<String>>> {
+        let cache = self.models_cache.read().await;
+        let cache = cache.as_ref()?;
+        cached_reasoning_efforts_from_cache(cache, keys)
+    }
+
+    async fn fetch_model_reasoning_efforts(&self) -> Result<HashMap<String, Vec<String>>, Error> {
+        let resp = self
+            .forward_inner(
+                "/models",
+                reqwest::Method::GET,
+                Bytes::new(),
+                None,
+                None,
+                false,
+                false,
+            )
+            .await?;
+        if !resp.status().is_success() {
+            return Err(Error::InvalidRequest(format!(
+                "failed to fetch Copilot models: HTTP {}",
+                resp.status()
+            )));
+        }
+
+        let value: serde_json::Value = resp.json().await?;
+        let mut map = HashMap::new();
+        let Some(models) = value.get("data").and_then(|v| v.as_array()) else {
+            return Ok(map);
+        };
+
+        for model in models {
+            let Some(efforts) = model
+                .pointer("/capabilities/supports/reasoning_effort")
+                .and_then(|v| v.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|values| !values.is_empty())
+            else {
+                continue;
+            };
+
+            for pointer in ["/id", "/version", "/capabilities/family"] {
+                if let Some(key) = model.pointer(pointer).and_then(|v| v.as_str()) {
+                    for key in model_lookup_keys(key) {
+                        map.insert(key, efforts.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(map)
+    }
+
     async fn send_request(
         &self,
         api_base: &str,
@@ -120,13 +227,16 @@ impl ProxyClient {
         token: &str,
         initiator: Option<&str>,
         is_vision: bool,
+        track_upstream: bool,
     ) -> Result<reqwest::Response, Error> {
-        let resolved_initiator = if initiator == Some("agent") {
-            "agent"
-        } else {
-            "user"
-        };
-        crate::server::record_upstream(resolved_initiator, path);
+        if track_upstream {
+            let resolved_initiator = if initiator == Some("agent") {
+                "agent"
+            } else {
+                "user"
+            };
+            crate::server::record_upstream(resolved_initiator, path);
+        }
 
         let mut req = self
             .client
@@ -146,6 +256,54 @@ impl ProxyClient {
 
         Ok(req.body(body.clone()).send().await?)
     }
+}
+
+fn cached_reasoning_efforts_from_cache(
+    cache: &ModelsCache,
+    keys: &[String],
+) -> Option<Option<Vec<String>>> {
+    let elapsed = cache.fetched_at.elapsed();
+    if elapsed > MODELS_CACHE_TTL {
+        return None;
+    }
+
+    let cached = keys
+        .iter()
+        .find_map(|key| cache.reasoning_efforts_by_model.get(key).cloned());
+    if cached.is_some() || elapsed <= MODELS_UNKNOWN_REFRESH_TTL {
+        return Some(cached);
+    }
+
+    None
+}
+
+fn model_lookup_keys(model: &str) -> Vec<String> {
+    let key = model.to_lowercase();
+    let mut keys = vec![key.clone()];
+
+    let dashed_key = key.replace('.', "-");
+    if dashed_key != key {
+        keys.push(dashed_key);
+    }
+
+    if let Some(dotted_key) = dot_last_numeric_dash(&key)
+        && !keys.contains(&dotted_key)
+    {
+        keys.push(dotted_key);
+    }
+
+    keys
+}
+
+fn dot_last_numeric_dash(key: &str) -> Option<String> {
+    let (prefix, last_segment) = key.rsplit_once('-')?;
+    let (_, previous_segment) = prefix.rsplit_once('-')?;
+    if !last_segment.chars().all(|c| c.is_ascii_digit())
+        || !previous_segment.chars().all(|c| c.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(format!("{prefix}.{last_segment}"))
 }
 
 fn copilot_headers(
@@ -245,4 +403,46 @@ pub async fn forward_response(resp: reqwest::Response) -> Result<Response, Error
     builder
         .body(body)
         .map_err(|e| Error::InvalidRequest(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_lookup_keys_include_dot_and_dash_spellings() {
+        assert_eq!(
+            model_lookup_keys("claude-opus-4.7"),
+            vec!["claude-opus-4.7".to_string(), "claude-opus-4-7".to_string(),]
+        );
+        assert_eq!(
+            model_lookup_keys("claude-opus-4-7"),
+            vec!["claude-opus-4-7".to_string(), "claude-opus-4.7".to_string(),]
+        );
+    }
+
+    #[test]
+    fn fresh_unknown_model_cache_miss_is_cached_briefly() {
+        let cache = ModelsCache {
+            fetched_at: Instant::now(),
+            reasoning_efforts_by_model: HashMap::new(),
+        };
+        let keys = vec!["brand-new-model".to_string()];
+
+        assert_eq!(
+            cached_reasoning_efforts_from_cache(&cache, &keys),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn older_unknown_model_cache_miss_triggers_refresh() {
+        let cache = ModelsCache {
+            fetched_at: Instant::now() - MODELS_UNKNOWN_REFRESH_TTL - Duration::from_secs(1),
+            reasoning_efforts_by_model: HashMap::new(),
+        };
+        let keys = vec!["brand-new-model".to_string()];
+
+        assert_eq!(cached_reasoning_efforts_from_cache(&cache, &keys), None);
+    }
 }

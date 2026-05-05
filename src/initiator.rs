@@ -39,7 +39,10 @@ pub fn infer_initiator_claude(messages: &[Value], headers: Option<&HeaderMap>) -
 }
 
 /// Analyze OpenAI chat completions request for initiator and vision.
-pub fn analyze_openai_chat_completions(body: &[u8], headers: Option<&HeaderMap>) -> RequestAnalysis {
+pub fn analyze_openai_chat_completions(
+    body: &[u8],
+    headers: Option<&HeaderMap>,
+) -> RequestAnalysis {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return RequestAnalysis {
             initiator: "user",

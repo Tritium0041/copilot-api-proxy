@@ -296,15 +296,8 @@ pub async fn handle_api_request(
             path = %path,
             "Handling locally with amp-local"
         );
-        return local::handle_local_api(
-            local_state,
-            &method,
-            &path,
-            uri.query(),
-            &headers,
-            &body,
-        )
-        .await;
+        return local::handle_local_api(local_state, &method, &path, uri.query(), &headers, &body)
+            .await;
     }
 
     let pq = uri
