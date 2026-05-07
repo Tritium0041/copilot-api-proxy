@@ -1,0 +1,116 @@
+name: CI and macOS release
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: copilot-api-proxy
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Run test suite
+        run: cargo test --locked
+
+  build-macos:
+    name: Build macOS (${{ matrix.target }})
+    needs: test
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+
+      - name: Build release binary
+        run: cargo build --release --locked --target "${{ matrix.target }}"
+
+      - name: Compute package name
+        id: package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME:-manual}"
+          version="${version//\//-}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            version="${version}-${GITHUB_SHA::7}"
+          fi
+          archive="${BINARY_NAME}-${version}-${{ matrix.target }}.tar.gz"
+          echo "archive=${archive}" >> "$GITHUB_OUTPUT"
+
+      - name: Package macOS binary
+        shell: bash
+        run: |
+          pkg_dir="dist/${BINARY_NAME}-${{ matrix.target }}"
+          mkdir -p "${pkg_dir}"
+          cp "target/${{ matrix.target }}/release/${BINARY_NAME}" "${pkg_dir}/"
+          cp README.md LICENSE "${pkg_dir}/"
+          tar -C "${pkg_dir}" -czf "dist/${{ steps.package.outputs.archive }}" .
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ steps.package.outputs.archive }}
+          path: dist/${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release assets
+    needs: build-macos
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: dist
+          pattern: "*.tar.gz"
+          merge-multiple: true
+
+      - name: Create or update GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz --repo "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "Automated macOS binaries for ${GITHUB_REF_NAME}."
+          fi
