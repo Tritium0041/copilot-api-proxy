@@ -50,6 +50,17 @@ cargo build --release
 
 The binary will be at `target/release/copilot-api-proxy`.
 
+### Prebuilt macOS binaries
+
+Push a `v*` tag to trigger the release workflow, or run the workflow manually from GitHub Actions.
+
+The workflow builds and packages both macOS targets:
+
+- `x86_64-apple-darwin` for Intel Macs
+- `aarch64-apple-darwin` for Apple Silicon Macs
+
+Each build is uploaded as a workflow artifact, and tagged builds are also published as downloadable `.tar.gz` assets on the corresponding GitHub Release. After downloading, extract the archive and run `./copilot-api-proxy`.
+
 ## Quick Start
 
 ### 1. Authenticate once
